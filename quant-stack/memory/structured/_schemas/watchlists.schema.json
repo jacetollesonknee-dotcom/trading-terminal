@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-stack.local/schemas/watchlists.schema.json",
+  "title": "Watchlists (tier + thesis overlay)",
+  "description": "Annotations on top of whatever Cowork pulls from Yahoo. Yahoo is the live source for *what* is on the list; this file says *which tier* and *why*.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tiers"],
+  "properties": {
+    "tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tier_1_core": {"$ref": "#/$defs/tier"},
+        "tier_2_tactical": {"$ref": "#/$defs/tier"},
+        "tier_3_speculation": {"$ref": "#/$defs/tier"},
+        "tier_avoid": {"$ref": "#/$defs/tier"}
+      }
+    },
+    "synced_from_yahoo_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Last time Cowork's Yahoo sync touched anything in this file."
+    }
+  },
+  "$defs": {
+    "tier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "members"],
+      "properties": {
+        "description": {"type": "string"},
+        "max_position_pct_of_nav": {"type": "number", "minimum": 0, "maximum": 100},
+        "members": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["symbol"],
+            "properties": {
+              "symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9.\\-]{0,11}$"},
+              "sector": {"type": "string"},
+              "thesis": {"type": "string"},
+              "added": {"type": "string", "format": "date"},
+              "review_date": {"type": "string", "format": "date"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

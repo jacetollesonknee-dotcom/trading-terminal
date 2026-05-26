@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-stack.local/schemas/rules.schema.json",
+  "title": "Hard rules (codified non-negotiables)",
+  "description": "Mirror of §2 of the brief, machine-readable so the agent and validators can check them.",
+  "type": "array",
+  "uniqueItems": true,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "description", "enforced_at"],
+    "properties": {
+      "id": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{2,63}$"
+      },
+      "description": {"type": "string", "minLength": 10},
+      "enforced_at": {
+        "type": "array",
+        "minItems": 1,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "enum": [
+            "schema",
+            "order_generator",
+            "paper_trader",
+            "live_trader",
+            "backtester",
+            "mcp_server",
+            "terminal_ui",
+            "monitoring",
+            "phase_7_gate",
+            "phase_8_gate"
+          ]
+        }
+      },
+      "permanent": {
+        "type": "boolean",
+        "default": false,
+        "description": "If true, survives every future phase including Phase 8."
+      },
+      "permanent_until": {
+        "type": "string",
+        "enum": ["phase_8", "nav_25k", "nav_50k"],
+        "description": "If set, the rule relaxes only when this trigger is hit."
+      },
+      "trigger_nav_usd": {"type": "number", "minimum": 0},
+      "principle_ref": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 12,
+        "description": "Principle number from §2 of the brief."
+      }
+    }
+  }
+}

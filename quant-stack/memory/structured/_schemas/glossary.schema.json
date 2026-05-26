@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-stack.local/schemas/glossary.schema.json",
+  "title": "Personal trading glossary",
+  "description": "Terms the operator uses idiomatically. When the agent encounters one of these, it should know what is meant without asking.",
+  "type": "array",
+  "uniqueItems": true,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["term", "meaning"],
+    "properties": {
+      "term": {"type": "string", "minLength": 1},
+      "meaning": {"type": "string", "minLength": 1},
+      "aliases": {
+        "type": "array",
+        "uniqueItems": true,
+        "items": {"type": "string"}
+      },
+      "example": {"type": "string"}
+    }
+  }
+}

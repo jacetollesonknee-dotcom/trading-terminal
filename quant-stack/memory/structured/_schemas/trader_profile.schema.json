@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-stack.local/schemas/trader_profile.schema.json",
+  "title": "Trader profile",
+  "description": "Identity, account, risk band, existing book. The agent reads this every conversation start.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nav_band", "account", "options_permissions", "existing_book", "margin"],
+  "properties": {
+    "nav_band": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_usd"],
+      "properties": {
+        "current_usd": {"type": "number", "minimum": 0},
+        "target_milestones": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["date", "nav_usd"],
+            "properties": {
+              "date": {"type": "string", "format": "date"},
+              "nav_usd": {"type": "number", "minimum": 0},
+              "note": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["broker", "type", "pdt_flagged"],
+      "properties": {
+        "broker": {"type": "string", "enum": ["schwab"]},
+        "type": {"type": "string", "enum": ["personal_taxable_margin", "personal_taxable_cash", "ira"]},
+        "pdt_flagged": {"type": "boolean"}
+      }
+    },
+    "options_permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "allowed_structures"],
+      "properties": {
+        "level": {"type": "integer", "minimum": 0, "maximum": 4},
+        "allowed_structures": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["long_call", "long_put", "cash_secured_put", "covered_call"]
+          },
+          "description": "Naked-only v1. Phase 8 widens this list explicitly via a separate ADR."
+        },
+        "forbidden_personal": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string"},
+          "description": "Structures permanently forbidden by personal rule. Survives Phase 8."
+        }
+      }
+    },
+    "existing_book": {
+      "type": "array",
+      "description": "Open positions as of latest reconciliation. Mirror of Schwab — kept here for the agent's reasoning, not as the source of truth.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["symbol", "type", "qty"],
+        "properties": {
+          "symbol": {"type": "string"},
+          "type": {"type": "string", "enum": ["equity", "long_call", "long_put", "cash_secured_put", "covered_call"]},
+          "qty": {"type": "number"},
+          "cost_basis": {"type": "number", "minimum": 0},
+          "expiration": {"type": "string", "format": "date"},
+          "strike": {"type": "number", "minimum": 0},
+          "note": {"type": "string"}
+        }
+      }
+    },
+    "margin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_debt_usd", "cap_pct_of_nav"],
+      "properties": {
+        "current_debt_usd": {"type": "number", "minimum": 0},
+        "cap_pct_of_nav": {"type": "number", "minimum": 0, "maximum": 100}
+      }
+    },
+    "contribution_schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cadence", "amount_usd"],
+      "properties": {
+        "cadence": {"type": "string", "enum": ["weekly", "biweekly", "monthly", "quarterly", "ad_hoc"]},
+        "amount_usd": {"type": "number", "minimum": 0}
+      }
+    },
+    "tax_notes": {
+      "type": "string",
+      "description": "Free-form notes the agent should consider when reasoning about trade timing vs wash-sale or LT-vs-ST."
+    }
+  }
+}

@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ── Project-specific ──────────────────────────────────────────────────────
+# Data store (parquet, duckdb, sqlite). Versioned via data snapshot hashes,
+# never committed.
+data/
+*.parquet
+*.duckdb
+*.sqlite
+*.sqlite-journal
+*.db
+*.db-journal
+
+# Secrets — these live in the OS keychain, NEVER on disk.
+schwab_token.json
+*.pem
+*.key
+
+# Runtime memory caches
+memory/raw/
+memory/cache/
+memory/semantic/
+
+# Logs + audit
+logs/
+audit/*.jsonl

@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-stack.local/schemas/greek_targets.schema.json",
+  "title": "Portfolio Greek limits + per-position risk caps + drawdown circuit breakers",
+  "description": "Numeric source of truth for risk/check_risk_limits and the order generator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["portfolio", "per_position", "exposure", "drawdown_circuit_breaker", "margin"],
+  "properties": {
+    "portfolio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_net_delta_usd", "max_vega_usd_per_volpt", "max_gamma"],
+      "properties": {
+        "max_net_delta_usd": {"type": "number", "minimum": 0},
+        "max_vega_usd_per_volpt": {"type": "number", "minimum": 0},
+        "max_gamma": {"type": "number", "minimum": 0}
+      }
+    },
+    "per_position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["core_wheel_max_loss_pct_nav", "tactical_max_loss_pct_nav"],
+      "properties": {
+        "core_wheel_max_loss_pct_nav": {"type": "number", "minimum": 0, "maximum": 100,
+          "description": "Per §5. Default 2."},
+        "tactical_max_loss_pct_nav": {"type": "number", "minimum": 0, "maximum": 100,
+          "description": "Per §5. Default 5."}
+      }
+    },
+    "exposure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_tactical_pct_nav", "max_per_underlying_pct", "max_per_sector_pct"],
+      "properties": {
+        "max_tactical_pct_nav": {"type": "number", "minimum": 0, "maximum": 100},
+        "max_per_underlying_pct": {"type": "number", "minimum": 0, "maximum": 100},
+        "max_per_sector_pct": {"type": "number", "minimum": 0, "maximum": 100},
+        "concentration_exceptions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["symbol", "max_pct"],
+            "properties": {
+              "symbol": {"type": "string"},
+              "max_pct": {"type": "number", "minimum": 0, "maximum": 100},
+              "reason": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "drawdown_circuit_breaker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["halve_at_dd_pct", "halt_new_at_dd_pct", "halt_all_at_dd_pct"],
+      "properties": {
+        "halve_at_dd_pct": {"type": "number", "maximum": 0,
+          "description": "Negative number, e.g. -10."},
+        "halt_new_at_dd_pct": {"type": "number", "maximum": 0},
+        "halt_all_at_dd_pct": {"type": "number", "maximum": 0}
+      }
+    },
+    "margin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pause_new_entries_above_pct_nav"],
+      "properties": {
+        "pause_new_entries_above_pct_nav": {"type": "number", "minimum": 0, "maximum": 100}
+      }
+    },
+    "staleness": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "halt_if_quote_age_s_exceeds": {"type": "number", "minimum": 1, "default": 60}
+      }
+    }
+  }
+}

@@ -1,0 +1,123 @@
+[project]
+name = "quant-stack"
+version = "0.1.0"
+description = "Headless quant engine for single-operator options trading. Naked-only. Paper-then-live. Exposes capabilities to Cowork via MCP."
+requires-python = ">=3.11,<3.13"
+readme = "README.md"
+license = {text = "Proprietary"}
+authors = [{name = "Jace Tolleson"}]
+
+dependencies = [
+    # ── Core ────────────────────────────────────────────────────────────
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+    "structlog>=24.1,<25",
+    "keyring>=25.0,<26",
+    "httpx>=0.27,<1",
+
+    # ── Quant / models ──────────────────────────────────────────────────
+    "numpy>=1.26,<3",
+    "pandas>=2.2,<3",
+    "polars>=1.0,<2",
+    "scipy>=1.13,<2",
+    "statsmodels>=0.14,<1",
+    "arch>=7.0,<8",           # GARCH family
+    "hmmlearn>=0.3,<1",       # HMM regime detection
+    "scikit-learn>=1.5,<2",
+    "QuantLib>=1.34,<2",      # American option pricing
+
+    # ── Storage / data ──────────────────────────────────────────────────
+    "pyarrow>=16.0,<22",      # parquet writer
+    "duckdb>=1.0,<2",         # analytical queries over parquet
+    "pyyaml>=6.0,<7",         # structured memory
+    "jsonschema>=4.22,<5",    # structured memory validation
+]
+
+[project.optional-dependencies]
+# Phase 6.5 — engine exposes tools to Cowork via MCP.
+mcp = [
+    "mcp>=0.9,<1",
+]
+
+# Terminal UI shell (Flask + SocketIO app under terminal/).
+# Existing prototype, integrated per ADR-003. The terminal calls Anthropic
+# directly today; in Phase 7.5 it gets refactored to fetch state from this
+# engine instead.
+terminal = [
+    "flask>=3.0,<4",
+    "flask-socketio>=5.3,<6",
+    "simple-websocket>=1.0,<2",
+    "anthropic>=0.45,<1",
+    "beautifulsoup4>=4.12,<5",
+    "lxml>=5.0,<7",
+    "python-dotenv>=1.0,<2",
+]
+
+dev = [
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.23,<1",
+    "hypothesis>=6.100,<7",
+    "mypy>=1.10,<2",
+    "ruff>=0.4,<1",
+    "bandit>=1.7,<2",
+    "pre-commit>=3.7,<5",
+    "types-pyyaml",
+    "types-jsonschema",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# ── Ruff ──────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["data", ".venv", "build", "dist", "__pycache__", "terminal"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "B", "W", "UP", "N", "S", "A",
+    "C4", "T20", "PT", "RET", "SIM", "ARG", "PL", "RUF",
+]
+ignore = [
+    "S101",   # assert OK
+    "PLR0913", # too many args — quant code often has many params
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "ARG", "PLR2004"]
+
+# ── Mypy ──────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+plugins = ["pydantic.mypy"]
+# terminal/ is the pre-existing Flask prototype — see ADR-003.
+# It gets its own less-strict gates (or a Phase 7.5 rewrite) later.
+exclude = ["build/", "dist/", "data/", "terminal/"]
+
+[[tool.mypy.overrides]]
+module = ["hmmlearn.*", "QuantLib.*", "arch.*", "statsmodels.*", "keyring.*"]
+ignore_missing_imports = true
+
+# ── Pytest ────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: integration tests (slower)",
+    "property: hypothesis property tests",
+    "live: requires live API access (skipped in CI)",
+]
+
+# ── Bandit ────────────────────────────────────────────────────────────────
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "build", "dist", "terminal"]
+skips = ["B101"]  # assert in non-test contexts handled case by case
+
+# ── Hatch build (so editable installs work) ───────────────────────────────
+[tool.hatch.build.targets.wheel]
+packages = ["config", "ingestion"]
