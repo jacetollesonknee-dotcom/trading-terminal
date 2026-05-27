@@ -17,13 +17,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from ingestion.schema import EquityBar
 from storage.query import PointInTimeQuery
 from storage.store import ParquetStore
-
 
 _SYMBOLS = ("AAA", "BBB", "CCC")
 _INTERVAL = "1d"

@@ -2,12 +2,12 @@
 
 Six tables (see ``migrations/001_init.sql``):
 
-- ``trades``           – every closed paper/live trade
-- ``conversations``    – every Cowork agent turn that reached this engine
-- ``positions``        – per-reconciliation snapshot of the book
-- ``signals_fired``    – every signal score + decision
-- ``mistakes``         – post-mortems, linked to trades
-- ``proposed_updates`` – staged diffs against structured memory
+- ``trades``           -- every closed paper/live trade
+- ``conversations``    -- every Cowork agent turn that reached this engine
+- ``positions``        -- per-reconciliation snapshot of the book
+- ``signals_fired``    -- every signal score + decision
+- ``mistakes``         -- post-mortems, linked to trades
+- ``proposed_updates`` -- staged diffs against structured memory
 
 This module owns connection lifecycle and migration application. It does NOT
 own write APIs for individual tables — those live next to the domain logic

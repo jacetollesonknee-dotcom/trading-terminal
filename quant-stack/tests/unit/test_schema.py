@@ -33,7 +33,7 @@ def _now() -> datetime:
 
 
 def test_equity_bar_rejects_naive_datetime() -> None:
-    naive = datetime.now()  # noqa: DTZ005 — intentionally naive
+    naive = datetime.now()
     with pytest.raises(ValidationError) as ei:
         EquityBar(
             as_of=naive,
@@ -154,7 +154,7 @@ def test_order_accepts_naked_structures() -> None:
             as_of=_now(),
             order_id=f"test-{structure}",
             account_id="X",
-            structure=structure,  # type: ignore[arg-type]
+            structure=structure,
             underlying="NVDA",
             side=OrderSide.buy,
             quantity=1,
@@ -163,7 +163,7 @@ def test_order_accepts_naked_structures() -> None:
             submitted_at=_now(),
             source="paper",
         )
-        assert order.structure == structure  # noqa: PLR2004 — covered by parametrize style
+        assert order.structure == structure
 
 
 @pytest.mark.parametrize(
@@ -177,7 +177,7 @@ def test_order_rejects_disallowed_structures(structure: str) -> None:
             as_of=_now(),
             order_id="x",
             account_id="X",
-            structure=structure,  # type: ignore[arg-type]
+            structure=structure,
             underlying="NVDA",
             side=OrderSide.sell,
             quantity=1,

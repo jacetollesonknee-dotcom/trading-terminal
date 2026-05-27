@@ -88,6 +88,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "ARG", "PLR2004"]
+# config/secrets.py exposes a small CLI for token seeding. CLI output is print, not log.
+"config/secrets.py" = ["T201"]
 
 # ── Mypy ──────────────────────────────────────────────────────────────────
 [tool.mypy]
@@ -98,10 +100,17 @@ show_error_codes = true
 plugins = ["pydantic.mypy"]
 # terminal/ is the pre-existing Flask prototype — see ADR-003.
 # It gets its own less-strict gates (or a Phase 7.5 rewrite) later.
-exclude = ["build/", "dist/", "data/", "terminal/"]
+exclude = ["build/", "dist/", "data/", "terminal/", "memory/migrations/", "memory/proposed_updates/"]
+# Each first-party package has its own __init__.py; tell mypy not to
+# also treat the files as top-level modules (would cause "found twice").
+explicit_package_bases = true
+namespace_packages = true
 
 [[tool.mypy.overrides]]
-module = ["hmmlearn.*", "QuantLib.*", "arch.*", "statsmodels.*", "keyring.*"]
+module = [
+    "hmmlearn.*", "QuantLib.*", "arch.*", "statsmodels.*", "keyring.*",
+    "pyarrow.*", "duckdb.*", "filelock.*", "hypothesis.*",
+]
 ignore_missing_imports = true
 
 # ── Pytest ────────────────────────────────────────────────────────────────

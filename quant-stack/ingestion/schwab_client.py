@@ -14,7 +14,7 @@ Cowork. Two OAuth surfaces, two tokens, isolated blast radius — see ADR-002.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Literal
 
 import httpx

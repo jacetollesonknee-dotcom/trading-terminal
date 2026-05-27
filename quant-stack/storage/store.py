@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
@@ -344,7 +344,12 @@ class ParquetStore:
 
             new_table = pa.Table.from_pylist(new_dicts, schema=schema)
             if path.exists():
-                existing_table = pq.read_table(path, schema=schema)
+                # Use ParquetFile (low-level) instead of read_table to bypass
+                # pyarrow's dataset/partition discovery, which would otherwise
+                # extract a dictionary-typed `interval` from the hive-style
+                # path AND see the explicit string `interval` column in the
+                # file, then refuse to merge them.
+                existing_table = pq.ParquetFile(str(path)).read()
                 combined = pa.concat_tables([existing_table, new_table])
             else:
                 combined = new_table
@@ -383,8 +388,14 @@ class ParquetStore:
 
 
 def _read_existing_keys(path: Path, key_cols: tuple[str, ...]) -> set[tuple[Any, ...]]:
-    """Read only the key columns from an existing file. Cheap dedup check."""
-    table = pq.read_table(path, columns=list(key_cols))
+    """Read only the key columns from an existing file. Cheap dedup check.
+
+    Uses ParquetFile (not read_table) to skip dataset/partition discovery —
+    otherwise pyarrow tries to merge a virtual partition-extracted column
+    with the same-named column stored in the file, and fails when the
+    partition extraction returns dictionary-typed strings.
+    """
+    table = pq.ParquetFile(str(path)).read(columns=list(key_cols))
     cols = [table.column(c).to_pylist() for c in key_cols]
     return set(zip(*cols, strict=True))
 

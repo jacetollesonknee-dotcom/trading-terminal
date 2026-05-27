@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml as pyyaml
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import ValidationError
 
 from memory.loader import (
     MEMORY_FILES,
     MemoryFileNotFoundError,
+    MemorySchemaError,
     list_available_files,
     load_structured,
     validate_payload,
@@ -54,7 +56,7 @@ def test_loader_registry_matches_disk() -> None:
 #  Naked-only enforcement — strategies.yaml
 # ─────────────────────────────────────────────────────────────────────────
 
-def _valid_strategy(structure: str = "cash_secured_put") -> dict:
+def _valid_strategy(structure: str = "cash_secured_put") -> dict[str, Any]:
     return {
         "name": "ai_infra_premium_harvest_csp",
         "thesis": "Sell CSPs on AI infra names with IV rank > 60 in low-vol regime.",
@@ -73,13 +75,11 @@ def test_strategies_accept_allowed_structures(structure: str) -> None:
 
 @pytest.mark.parametrize("structure", DISALLOWED_STRUCTURES)
 def test_strategies_reject_disallowed_structures(structure: str) -> None:
-    from memory.loader import MemorySchemaError
     with pytest.raises(MemorySchemaError, match="structure"):
         validate_payload("strategies", [_valid_strategy(structure)])
 
 
 def test_strategies_reject_unknown_top_level_field() -> None:
-    from memory.loader import MemorySchemaError
     bad = _valid_strategy()
     bad["secret_sauce"] = "lol"
     with pytest.raises(MemorySchemaError):
@@ -88,7 +88,6 @@ def test_strategies_reject_unknown_top_level_field() -> None:
 
 def test_strategies_require_thesis_of_substance() -> None:
     """30-char minimum on thesis — discourages drive-by entries."""
-    from memory.loader import MemorySchemaError
     s = _valid_strategy()
     s["thesis"] = "vibes"
     with pytest.raises(MemorySchemaError):
@@ -99,7 +98,7 @@ def test_strategies_require_thesis_of_substance() -> None:
 #  Naked-only enforcement — trader_profile.yaml allowed_structures
 # ─────────────────────────────────────────────────────────────────────────
 
-def _valid_trader_profile() -> dict:
+def _valid_trader_profile() -> dict[str, Any]:
     return {
         "nav_band": {"current_usd": 19500},
         "account": {"broker": "schwab", "type": "personal_taxable_margin", "pdt_flagged": True},
@@ -119,7 +118,6 @@ def test_trader_profile_round_trips() -> None:
 
 @pytest.mark.parametrize("structure", DISALLOWED_STRUCTURES)
 def test_trader_profile_rejects_disallowed_in_permissions(structure: str) -> None:
-    from memory.loader import MemorySchemaError
     p = _valid_trader_profile()
     p["options_permissions"]["allowed_structures"].append(structure)
     with pytest.raises(MemorySchemaError):
@@ -137,7 +135,6 @@ def test_load_structured_raises_when_missing(tmp_path: Path) -> None:
 
 
 def test_load_structured_round_trips_a_real_file(tmp_path: Path) -> None:
-    import yaml as pyyaml
     (tmp_path / "rules.yaml").write_text(
         pyyaml.safe_dump([{
             "id": "naked_only",

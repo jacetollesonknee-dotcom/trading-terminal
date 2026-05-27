@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -25,7 +27,7 @@ from memory.episodic import (
 
 
 @pytest.fixture
-def conn() -> sqlite3.Connection:
+def conn() -> Iterator[sqlite3.Connection]:
     c = initialize(":memory:")
     yield c
     c.close()
@@ -159,7 +161,7 @@ def test_mistakes_can_link_to_trade(conn: sqlite3.Connection) -> None:
 #  Read-only connection refuses writes
 # ─────────────────────────────────────────────────────────────────────────
 
-def test_read_only_connection_refuses_writes(tmp_path) -> None:
+def test_read_only_connection_refuses_writes(tmp_path: Path) -> None:
     db_path = tmp_path / "ep.sqlite"
     writer = initialize(db_path)
     writer.close()
@@ -177,7 +179,7 @@ def test_read_only_connection_refuses_writes(tmp_path) -> None:
 #  Migration discovery rejects bad filenames
 # ─────────────────────────────────────────────────────────────────────────
 
-def test_apply_migrations_rejects_bad_filename(tmp_path) -> None:
+def test_apply_migrations_rejects_bad_filename(tmp_path: Path) -> None:
     (tmp_path / "garbage.sql").write_text("SELECT 1;")
     conn = get_connection(":memory:")
     with pytest.raises(MigrationError, match="NNN_description"):

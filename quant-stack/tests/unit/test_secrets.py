@@ -5,11 +5,13 @@ Uses keyring's in-memory backend so nothing touches the real OS store.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import keyring
 import pytest
 from keyring.backend import KeyringBackend
+from keyring.errors import PasswordDeleteError
 
 from config.secrets import (
     SchwabToken,
@@ -22,7 +24,7 @@ from config.secrets import (
 class _InMemoryKeyring(KeyringBackend):
     """Trivial keyring backend for tests — never touches the real OS store."""
 
-    priority = 1  # type: ignore[assignment]
+    priority = 1
 
     def __init__(self) -> None:
         self._store: dict[tuple[str, str], str] = {}
@@ -35,14 +37,12 @@ class _InMemoryKeyring(KeyringBackend):
 
     def delete_password(self, service: str, username: str) -> None:
         if (service, username) not in self._store:
-            from keyring.errors import PasswordDeleteError
-
             raise PasswordDeleteError
         del self._store[(service, username)]
 
 
 @pytest.fixture(autouse=True)
-def _isolated_keyring():  # type: ignore[no-untyped-def]
+def _isolated_keyring() -> Iterator[None]:
     """Swap in the in-memory backend for the duration of every test."""
     original = keyring.get_keyring()
     keyring.set_keyring(_InMemoryKeyring())
@@ -94,7 +94,7 @@ def test_envs_are_isolated() -> None:
 
 def test_invalid_env_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported Schwab env"):
-        get_schwab_token(env="staging")  # type: ignore[arg-type]
+        get_schwab_token(env="staging")
 
 
 def test_is_expired() -> None:

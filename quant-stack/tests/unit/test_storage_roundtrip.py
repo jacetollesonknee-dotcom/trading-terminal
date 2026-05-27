@@ -12,7 +12,7 @@ PointInTimeQuery pinned to various decision times. Covers:
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -26,7 +26,7 @@ from ingestion.schema import (
     OptionsChainSnapshot,
 )
 from storage.query import PointInTimeQuery
-from storage.store import ParquetStore, StoreError
+from storage.store import ParquetStore
 
 
 def _bar(
@@ -185,8 +185,14 @@ def test_options_chain_round_trip(tmp_path: Path) -> None:
         underlying="NVDA",
         underlying_price=505.0,
         contracts=(
-            _contract(strike=500, right=OptionRight.call, expiry=date(2024, 6, 21), as_of=snap_time),
-            _contract(strike=510, right=OptionRight.put, expiry=date(2024, 6, 21), as_of=snap_time),
+            _contract(
+                strike=500, right=OptionRight.call,
+                expiry=date(2024, 6, 21), as_of=snap_time,
+            ),
+            _contract(
+                strike=510, right=OptionRight.put,
+                expiry=date(2024, 6, 21), as_of=snap_time,
+            ),
         ),
         source="schwab",
     )
@@ -208,7 +214,10 @@ def test_options_chain_refuses_overwrite(tmp_path: Path) -> None:
     snapshot = OptionsChainSnapshot(
         as_of=snap_time, underlying="NVDA", underlying_price=505.0,
         contracts=(
-            _contract(strike=500, right=OptionRight.call, expiry=date(2024, 6, 21), as_of=snap_time),
+            _contract(
+                strike=500, right=OptionRight.call,
+                expiry=date(2024, 6, 21), as_of=snap_time,
+            ),
         ),
         source="schwab",
     )
@@ -225,7 +234,10 @@ def test_options_chain_invisible_before_snapshot_time(tmp_path: Path) -> None:
     snapshot = OptionsChainSnapshot(
         as_of=snap_time, underlying="NVDA", underlying_price=505.0,
         contracts=(
-            _contract(strike=500, right=OptionRight.call, expiry=date(2024, 6, 21), as_of=snap_time),
+            _contract(
+                strike=500, right=OptionRight.call,
+                expiry=date(2024, 6, 21), as_of=snap_time,
+            ),
         ),
         source="schwab",
     )
@@ -292,7 +304,7 @@ def test_earnings_round_trip(tmp_path: Path) -> None:
 def test_query_rejects_naive_decision_time(tmp_path: Path) -> None:
     store = ParquetStore(tmp_path, env="test")
     with pytest.raises(ValueError, match="timezone-aware"):
-        PointInTimeQuery(store, as_of=datetime(2024, 1, 1))  # noqa: DTZ001
+        PointInTimeQuery(store, as_of=datetime(2024, 1, 1))
 
 
 def test_query_empty_when_symbol_missing(tmp_path: Path) -> None:
@@ -305,5 +317,5 @@ def test_query_empty_when_symbol_missing(tmp_path: Path) -> None:
 
 
 def test_store_requires_non_empty_env(tmp_path: Path) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="non-empty"):
         ParquetStore(tmp_path, env="")
