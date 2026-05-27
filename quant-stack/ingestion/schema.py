@@ -19,7 +19,7 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Common
@@ -113,14 +113,14 @@ class EquityBar(_ImmutableModel):
     def _utc(cls, v: datetime) -> datetime:
         return _ensure_utc(v)
 
-    @field_validator("high")
-    @classmethod
-    def _high_ge_low(cls, v: float, info) -> float:  # type: ignore[no-untyped-def]
-        low = info.data.get("low")
-        if low is not None and v < low:
-            msg = f"high={v} < low={low}"
+    @model_validator(mode="after")
+    def _validate_high_low(self) -> EquityBar:
+        # Field validators run in declaration order, so a field_validator on
+        # `high` never sees `low` in info.data. Use a model validator instead.
+        if self.high < self.low:
+            msg = f"high={self.high} < low={self.low}"
             raise ValueError(msg)
-        return v
+        return self
 
 
 class OptionContract(_ImmutableModel):

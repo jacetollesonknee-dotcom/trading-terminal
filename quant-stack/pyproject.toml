@@ -14,6 +14,7 @@ dependencies = [
     "structlog>=24.1,<25",
     "keyring>=25.0,<26",
     "httpx>=0.27,<1",
+    "filelock>=3.13,<4",      # cross-platform per-file locks (storage writer)
 
     # ── Quant / models ──────────────────────────────────────────────────
     "numpy>=1.26,<3",
