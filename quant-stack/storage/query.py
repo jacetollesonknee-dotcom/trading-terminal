@@ -22,6 +22,7 @@ from ingestion.schema import (
     CorporateAction,
     EarningsEvent,
     EquityBar,
+    InsiderTrade,
     OptionContract,
     OptionRight,
     OptionsChainSnapshot,
@@ -181,6 +182,39 @@ class PointInTimeQuery:
         rows, cols = _execute(sql, params)
         return [_row_to_corp_action(dict(zip(cols, r, strict=True))) for r in rows]
 
+    # ── insider trades ────────────────────────────────────────────────────
+
+    def insider_trades(
+        self,
+        ticker: str,
+        *,
+        start: date | None = None,
+        trade_type_filter: str | None = None,
+    ) -> list[InsiderTrade]:
+        """Insider trades for ``ticker``, filtered to as_of <= decision_time.
+
+        :param trade_type_filter: substring match on trade_type (case-insensitive).
+            Use ``"purchase"`` to get only buys, ``"sale"`` for sells.
+        """
+        sym = ticker.upper()
+        sym_root = partition.insider_trades_symbol_root(
+            self._store.base_dir, self._store.env, sym
+        )
+        if not sym_root.exists() or not any(sym_root.rglob("trades.parquet")):
+            return []
+        glob = _to_posix(sym_root / "**" / "trades.parquet")
+        sql = "SELECT * FROM read_parquet(?, hive_partitioning=1) WHERE as_of <= ?"
+        params: list[Any] = [glob, self._as_of]
+        if start is not None:
+            sql += " AND filing_date >= ?"
+            params.append(start)
+        if trade_type_filter is not None:
+            sql += " AND lower(trade_type) LIKE ?"
+            params.append(f"%{trade_type_filter.lower()}%")
+        sql += " ORDER BY filing_date DESC, trade_date DESC"
+        rows, cols = _execute(sql, params)
+        return [_row_to_insider_trade(dict(zip(cols, r, strict=True))) for r in rows]
+
     # ── earnings ──────────────────────────────────────────────────────────
 
     def earnings(
@@ -254,6 +288,28 @@ def _row_to_option_contract(row: dict[str, Any]) -> OptionContract:
         theta=row.get("theta"),
         vega=row.get("vega"),
         rho=row.get("rho"),
+        source=row["source"],
+    )
+
+
+def _row_to_insider_trade(row: dict[str, Any]) -> InsiderTrade:
+    return InsiderTrade(
+        as_of=_ensure_utc(row["as_of"]),
+        filing_date=row["filing_date"],
+        trade_date=row["trade_date"],
+        ticker=row["ticker"],
+        company=row.get("company"),
+        insider_name=row["insider_name"],
+        insider_title=row.get("insider_title"),
+        trade_type=row["trade_type"],
+        price_per_share=row.get("price_per_share"),
+        quantity=int(row["quantity"]),
+        shares_owned_after=(
+            int(row["shares_owned_after"])
+            if row.get("shares_owned_after") is not None
+            else None
+        ),
+        dollar_value=row.get("dollar_value"),
         source=row["source"],
     )
 

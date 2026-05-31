@@ -218,6 +218,43 @@ class EarningsEvent(_ImmutableModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Sentiment / activity feeds
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class InsiderTrade(_ImmutableModel):
+    """A single Form-4 insider transaction.
+
+    Source v1: OpenInsider's HTML tables (Phase 1.4b). Primary key for
+    dedup at the storage layer:
+        (ticker, filing_date, trade_date, insider_name, trade_type,
+         price_per_share, quantity).
+
+    Fields can be None when OpenInsider leaves a cell blank — common for
+    option-exercise rows where there's no per-share price, for instance.
+    """
+
+    as_of: _AsOf
+    filing_date: date
+    trade_date: date
+    ticker: str = Field(min_length=1, max_length=12)
+    company: str | None = None
+    insider_name: str = Field(min_length=1)
+    insider_title: str | None = None
+    trade_type: str = Field(min_length=1)        # e.g. "P - Purchase", "S - Sale"
+    price_per_share: float | None = Field(default=None, ge=0)
+    quantity: int = Field(ge=0)
+    shares_owned_after: int | None = Field(default=None, ge=0)
+    dollar_value: float | None = None
+    source: Literal["openinsider"]
+
+    @field_validator("as_of")
+    @classmethod
+    def _utc(cls, v: datetime) -> datetime:
+        return _ensure_utc(v)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Account / portfolio state
 # ─────────────────────────────────────────────────────────────────────────────
 

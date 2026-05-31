@@ -20,6 +20,7 @@ _EQUITIES: Final[str] = "equities"
 _OPTIONS: Final[str] = "options"
 _CORP_ACTIONS: Final[str] = "corporate_actions"
 _EARNINGS: Final[str] = "earnings"
+_INSIDER_TRADES: Final[str] = "insider_trades"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +76,19 @@ def earnings_file(base_dir: Path, env: str, symbol: str) -> Path:
     return base_dir / env / _EARNINGS / f"{symbol.upper()}.parquet"
 
 
+def insider_trades_file(base_dir: Path, env: str, ticker: str, year: int) -> Path:
+    """One file per (ticker, filing-year) for insider trades."""
+    return (
+        base_dir / env / _INSIDER_TRADES / ticker.upper()
+        / f"year={year}" / "trades.parquet"
+    )
+
+
+def insider_trades_symbol_root(base_dir: Path, env: str, ticker: str) -> Path:
+    """Root of all years for one ticker's insider trades."""
+    return base_dir / env / _INSIDER_TRADES / ticker.upper()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Scanners — return existing parquet paths for DuckDB to read across
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,3 +122,10 @@ def scan_earnings_files(base_dir: Path, env: str) -> list[Path]:
     if not root.exists():
         return []
     return sorted(root.glob("*.parquet"))
+
+
+def scan_insider_trades_files(base_dir: Path, env: str) -> list[Path]:
+    root = base_dir / env / _INSIDER_TRADES
+    if not root.exists():
+        return []
+    return sorted(root.rglob("trades.parquet"))

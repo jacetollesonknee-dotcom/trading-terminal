@@ -32,6 +32,7 @@ from ingestion.schema import (
     CorporateAction,
     EarningsEvent,
     EquityBar,
+    InsiderTrade,
     OptionContract,
     OptionsChainSnapshot,
 )
@@ -101,6 +102,24 @@ _EARNINGS_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("eps_estimate", pa.float64(), nullable=True),
         pa.field("eps_actual", pa.float64(), nullable=True),
         pa.field("eps_surprise_pct", pa.float64(), nullable=True),
+        pa.field("source", pa.string(), nullable=False),
+    ]
+)
+
+_INSIDER_TRADE_SCHEMA: Final[pa.Schema] = pa.schema(
+    [
+        pa.field("as_of", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("filing_date", pa.date32(), nullable=False),
+        pa.field("trade_date", pa.date32(), nullable=False),
+        pa.field("ticker", pa.string(), nullable=False),
+        pa.field("company", pa.string(), nullable=True),
+        pa.field("insider_name", pa.string(), nullable=False),
+        pa.field("insider_title", pa.string(), nullable=True),
+        pa.field("trade_type", pa.string(), nullable=False),
+        pa.field("price_per_share", pa.float64(), nullable=True),
+        pa.field("quantity", pa.int64(), nullable=False),
+        pa.field("shares_owned_after", pa.int64(), nullable=True),
+        pa.field("dollar_value", pa.float64(), nullable=True),
         pa.field("source", pa.string(), nullable=False),
     ]
 )
@@ -269,6 +288,51 @@ class ParquetStore:
                 files.append(path)
         return WriteResult(
             requested=len(actions_list),
+            persisted=total_persisted,
+            deduplicated=total_dedup,
+            rejected_schema=0,
+            files_touched=tuple(files),
+        )
+
+    def write_insider_trades(self, trades: Iterable[InsiderTrade]) -> WriteResult:
+        """Persist insider trades.
+
+        Grouped by (ticker, filing_year). Primary key for dedup:
+            (ticker, filing_date, trade_date, insider_name, trade_type,
+             price_per_share, quantity).
+
+        OpenInsider records can shift slightly between fetches (corrections,
+        late filings); the wide composite key keeps the same logical trade
+        from being duplicated when it does.
+        """
+        trades_list = list(trades)
+        if not trades_list:
+            return WriteResult(0, 0, 0, 0)
+        groups: dict[tuple[str, int], list[InsiderTrade]] = {}
+        for t in trades_list:
+            key = (t.ticker.upper(), t.filing_date.year)
+            groups.setdefault(key, []).append(t)
+        total_persisted = 0
+        total_dedup = 0
+        files: list[Path] = []
+        for (ticker, year), batch in groups.items():
+            path = partition.insider_trades_file(self._base, self._env, ticker, year)
+            persisted, dedup = self._upsert(
+                path,
+                batch,
+                _INSIDER_TRADE_SCHEMA,
+                _insider_trade_to_record,
+                key_cols=(
+                    "ticker", "filing_date", "trade_date", "insider_name",
+                    "trade_type", "price_per_share", "quantity",
+                ),
+            )
+            total_persisted += persisted
+            total_dedup += dedup
+            if persisted:
+                files.append(path)
+        return WriteResult(
+            requested=len(trades_list),
             persisted=total_persisted,
             deduplicated=total_dedup,
             rejected_schema=0,
@@ -451,6 +515,24 @@ def _corp_action_to_record(a: CorporateAction) -> dict[str, Any]:
         "ratio": a.ratio,
         "cash_amount": a.cash_amount,
         "source": a.source,
+    }
+
+
+def _insider_trade_to_record(t: InsiderTrade) -> dict[str, Any]:
+    return {
+        "as_of": t.as_of,
+        "filing_date": t.filing_date,
+        "trade_date": t.trade_date,
+        "ticker": t.ticker.upper(),
+        "company": t.company,
+        "insider_name": t.insider_name,
+        "insider_title": t.insider_title,
+        "trade_type": t.trade_type,
+        "price_per_share": t.price_per_share,
+        "quantity": t.quantity,
+        "shares_owned_after": t.shares_owned_after,
+        "dollar_value": t.dollar_value,
+        "source": t.source,
     }
 
 
