@@ -58,6 +58,7 @@ dev = [
     "pytest>=8.2,<9",
     "pytest-asyncio>=0.23,<1",
     "hypothesis>=6.100,<7",
+    "respx>=0.21,<1",          # httpx mocking for ingestion tests
     "mypy>=1.10,<2",
     "ruff>=0.4,<1",
     "bandit>=1.7,<2",
@@ -116,7 +117,9 @@ ignore_missing_imports = true
 # ── Pytest ────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# Skip `live` tests by default — they hit real external APIs. To opt in:
+# `uv run pytest -m live` (or `pytest -m "live or not live"` for everything).
+addopts = "-ra --strict-markers -m 'not live'"
 markers = [
     "integration: integration tests (slower)",
     "property: hypothesis property tests",
@@ -130,4 +133,4 @@ skips = ["B101"]  # assert in non-test contexts handled case by case
 
 # ── Hatch build (so editable installs work) ───────────────────────────────
 [tool.hatch.build.targets.wheel]
-packages = ["config", "ingestion"]
+packages = ["config", "ingestion", "memory", "storage"]
