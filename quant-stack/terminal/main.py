@@ -585,6 +585,44 @@ def api_status():
     })
 
 
+# ── Brokers status (Phase 1.4a — read-only surface) ──────────────────────────
+# Reads the engine's broker registry + keychain state. No OAuth flow yet;
+# the "Connect" UI tells the operator to run `python -m cli connect <broker>`
+# from a shell once their Schwab keys are ready.
+@app.route("/api/brokers/status")
+def api_brokers_status():
+    """Per-broker enable flag + token-in-keychain check."""
+    try:
+        from config.secrets import get_schwab_token
+        from config.settings import BrokerName, get_settings
+        from ingestion.brokers.registry import list_registered
+
+        settings = get_settings()
+        rows = []
+        for broker in list_registered():
+            try:
+                has_token = get_schwab_token(env="production") is not None
+            except Exception:  # noqa: BLE001
+                has_token = False
+            rows.append({
+                "name": broker.value,
+                "enabled": settings.brokers_enabled.get(broker.value, False),
+                "has_token": has_token,
+                "env": "production",
+            })
+        return jsonify({"brokers": rows, "engine_available": True})
+    except Exception as e:  # noqa: BLE001
+        # Engine import failed (e.g. running terminal-only). Surface gracefully.
+        return jsonify({
+            "brokers": [
+                {"name": "schwab", "enabled": False, "has_token": False, "env": "production"},
+                {"name": "tos", "enabled": False, "has_token": False, "env": "production"},
+            ],
+            "engine_available": False,
+            "error": str(e),
+        })
+
+
 @app.route("/api/quote/<symbol>")
 def api_quote(symbol):
     return jsonify(get_quote(symbol))

@@ -79,17 +79,22 @@ class SchwabClient:
     re-run the OAuth flow out-of-band.
     """
 
+    name = "schwab"
+
     def __init__(self, settings: Settings) -> None:
         """Construct a client bound to a Settings instance.
 
         :param settings: process settings. Determines API base URL (prod vs
             sandbox), request timeout, and rate-limit ceiling.
+
+        Construction itself is cheap and side-effect-free — only stores the
+        config. Actual network activity happens inside the async methods,
+        which raise NotImplementedError until Phase 1.2 ships real bodies.
         """
         self._settings = settings
         self._base_url = _BASE_URLS[settings.schwab_env]
         self._token: SchwabToken | None = None
         self._http: httpx.AsyncClient | None = None
-        raise NotImplementedError("Phase 0 — interface only.")
 
     # ── async context manager ──────────────────────────────────────────
 
@@ -112,12 +117,13 @@ class SchwabClient:
         """
         raise NotImplementedError("Phase 0 — interface only.")
 
-    async def refresh_token(self) -> SchwabToken:
+    async def refresh_token(self) -> None:
         """Exchange the refresh_token for a fresh access_token.
 
-        Persists the new token back to the OS keychain on success.
+        Persists the new token back to the OS keychain on success; updates
+        :attr:`_token` in-place. No return — callers read the new token via
+        :func:`config.secrets.get_schwab_token` if they need the object.
 
-        :returns: the new :class:`SchwabToken`.
         :raises SchwabAuthError: Schwab rejected the refresh.
         """
         raise NotImplementedError("Phase 0 — interface only.")

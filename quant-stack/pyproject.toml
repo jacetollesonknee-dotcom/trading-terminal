@@ -88,9 +88,14 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S", "ARG", "PLR2004"]
+"tests/**" = ["S", "ARG", "PLR2004", "PT018"]
 # config/secrets.py exposes a small CLI for token seeding. CLI output is print, not log.
 "config/secrets.py" = ["T201"]
+# CLI modules are allowed to print and to use deferred imports inside the dispatch table.
+"cli/**" = ["T201", "PLC0415"]
+# Registry uses lazy factories — late-bound imports inside functions are intentional
+# (decouples the registry module from the broker client modules).
+"ingestion/brokers/registry.py" = ["PLC0415"]
 
 # ── Mypy ──────────────────────────────────────────────────────────────────
 [tool.mypy]

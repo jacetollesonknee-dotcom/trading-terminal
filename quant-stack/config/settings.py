@@ -40,6 +40,17 @@ class SchwabEnv(StrEnum):
     sandbox = "sandbox"
 
 
+class BrokerName(StrEnum):
+    """Brokers the registry knows how to route to.
+
+    Both ride on the Schwab Trader API since the Ameritrade consolidation;
+    the difference is account scope and ID format, not the endpoint surface.
+    """
+
+    schwab = "schwab"
+    tos = "tos"
+
+
 class Settings(BaseSettings):
     """Process-wide runtime configuration.
 
@@ -95,6 +106,16 @@ class Settings(BaseSettings):
         default=2.0,
         gt=0,
         description="Conservative outbound rate limit. Schwab tightens silently.",
+    )
+
+    # ── Brokers feature gate ─────────────────────────────────────────────
+    brokers_enabled: dict[str, bool] = Field(
+        default_factory=lambda: {b.value: False for b in BrokerName},
+        description=(
+            "Per-broker feature flag. False = broker registry refuses to "
+            "instantiate even if a token exists in the keychain. Default "
+            "is all-disabled until the operator runs `python -m cli connect <broker>`."
+        ),
     )
 
     # ── Logging ─────────────────────────────────────────────────────────
