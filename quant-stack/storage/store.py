@@ -29,6 +29,7 @@ import pyarrow.parquet as pq
 from filelock import FileLock
 
 from ingestion.schema import (
+    AnalystRating,
     CorporateAction,
     EarningsEvent,
     EquityBar,
@@ -102,6 +103,25 @@ _EARNINGS_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("eps_estimate", pa.float64(), nullable=True),
         pa.field("eps_actual", pa.float64(), nullable=True),
         pa.field("eps_surprise_pct", pa.float64(), nullable=True),
+        pa.field("source", pa.string(), nullable=False),
+    ]
+)
+
+_ANALYST_RATING_SCHEMA: Final[pa.Schema] = pa.schema(
+    [
+        pa.field("as_of", pa.timestamp("us", tz="UTC"), nullable=False),
+        # Derived from as_of at write time; the daily-snapshot dedup key.
+        pa.field("as_of_date", pa.date32(), nullable=False),
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("rank", pa.int64(), nullable=True),
+        pa.field("rank_text", pa.string(), nullable=True),
+        pa.field("price_target", pa.float64(), nullable=True),
+        pa.field("style_score_value", pa.string(), nullable=True),
+        pa.field("style_score_growth", pa.string(), nullable=True),
+        pa.field("style_score_momentum", pa.string(), nullable=True),
+        pa.field("style_score_vgm", pa.string(), nullable=True),
+        pa.field("industry_rank", pa.int64(), nullable=True),
+        pa.field("industry_rank_text", pa.string(), nullable=True),
         pa.field("source", pa.string(), nullable=False),
     ]
 )
@@ -288,6 +308,46 @@ class ParquetStore:
                 files.append(path)
         return WriteResult(
             requested=len(actions_list),
+            persisted=total_persisted,
+            deduplicated=total_dedup,
+            rejected_schema=0,
+            files_touched=tuple(files),
+        )
+
+    def write_analyst_ratings(self, ratings: Iterable[AnalystRating]) -> WriteResult:
+        """Persist analyst ratings.
+
+        Grouped by (symbol, year). Primary key for dedup:
+            (symbol, source, CAST(as_of AS DATE)).
+
+        Zacks publishes once a day pre-market, so storing more than one
+        snapshot per (symbol, day) is noise. The store dedups silently.
+        """
+        ratings_list = list(ratings)
+        if not ratings_list:
+            return WriteResult(0, 0, 0, 0)
+        groups: dict[tuple[str, int], list[AnalystRating]] = {}
+        for r in ratings_list:
+            key = (r.symbol.upper(), r.as_of.year)
+            groups.setdefault(key, []).append(r)
+        total_persisted = 0
+        total_dedup = 0
+        files: list[Path] = []
+        for (symbol, year), batch in groups.items():
+            path = partition.analyst_ratings_file(self._base, self._env, symbol, year)
+            persisted, dedup = self._upsert(
+                path,
+                batch,
+                _ANALYST_RATING_SCHEMA,
+                _analyst_rating_to_record,
+                key_cols=("symbol", "source", "as_of_date"),
+            )
+            total_persisted += persisted
+            total_dedup += dedup
+            if persisted:
+                files.append(path)
+        return WriteResult(
+            requested=len(ratings_list),
             persisted=total_persisted,
             deduplicated=total_dedup,
             rejected_schema=0,
@@ -515,6 +575,24 @@ def _corp_action_to_record(a: CorporateAction) -> dict[str, Any]:
         "ratio": a.ratio,
         "cash_amount": a.cash_amount,
         "source": a.source,
+    }
+
+
+def _analyst_rating_to_record(r: AnalystRating) -> dict[str, Any]:
+    return {
+        "as_of": r.as_of,
+        "as_of_date": r.as_of.date(),
+        "symbol": r.symbol.upper(),
+        "rank": r.rank,
+        "rank_text": r.rank_text,
+        "price_target": r.price_target,
+        "style_score_value": r.style_score_value,
+        "style_score_growth": r.style_score_growth,
+        "style_score_momentum": r.style_score_momentum,
+        "style_score_vgm": r.style_score_vgm,
+        "industry_rank": r.industry_rank,
+        "industry_rank_text": r.industry_rank_text,
+        "source": r.source,
     }
 
 

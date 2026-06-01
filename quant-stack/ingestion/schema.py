@@ -222,6 +222,35 @@ class EarningsEvent(_ImmutableModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class AnalystRating(_ImmutableModel):
+    """A single analyst-firm rating snapshot for one ticker.
+
+    Source v1: Zacks (Phase 1.4c). Primary key for dedup:
+        (symbol, source, as_of_date).
+
+    One snapshot per ticker per day is plenty — Zacks updates pre-market.
+    """
+
+    as_of: _AsOf
+    symbol: str = Field(min_length=1, max_length=12)
+    rank: int | None = Field(default=None, ge=1, le=5,
+                             description="Zacks rank 1=Strong Buy through 5=Strong Sell.")
+    rank_text: str | None = None       # "Strong Buy" | "Buy" | "Hold" | "Sell" | "Strong Sell"
+    price_target: float | None = Field(default=None, ge=0)
+    style_score_value: str | None = None
+    style_score_growth: str | None = None
+    style_score_momentum: str | None = None
+    style_score_vgm: str | None = None
+    industry_rank: int | None = Field(default=None, ge=0)
+    industry_rank_text: str | None = None
+    source: Literal["zacks"]
+
+    @field_validator("as_of")
+    @classmethod
+    def _utc(cls, v: datetime) -> datetime:
+        return _ensure_utc(v)
+
+
 class InsiderTrade(_ImmutableModel):
     """A single Form-4 insider transaction.
 

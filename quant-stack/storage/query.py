@@ -19,6 +19,7 @@ import duckdb
 import pyarrow.parquet as pq
 
 from ingestion.schema import (
+    AnalystRating,
     CorporateAction,
     EarningsEvent,
     EquityBar,
@@ -182,6 +183,39 @@ class PointInTimeQuery:
         rows, cols = _execute(sql, params)
         return [_row_to_corp_action(dict(zip(cols, r, strict=True))) for r in rows]
 
+    # ── analyst ratings ───────────────────────────────────────────────────
+
+    def analyst_ratings(
+        self,
+        symbol: str,
+        *,
+        start: date | None = None,
+    ) -> list[AnalystRating]:
+        """Analyst ratings (Zacks) for ``symbol``, ordered newest first.
+
+        Filtered to ``as_of <= decision_time`` like every other read.
+        """
+        sym = symbol.upper()
+        sym_root = partition.analyst_ratings_symbol_root(
+            self._store.base_dir, self._store.env, sym
+        )
+        if not sym_root.exists() or not any(sym_root.rglob("ratings.parquet")):
+            return []
+        glob = _to_posix(sym_root / "**" / "ratings.parquet")
+        sql = "SELECT * FROM read_parquet(?, hive_partitioning=1) WHERE as_of <= ?"
+        params: list[Any] = [glob, self._as_of]
+        if start is not None:
+            sql += " AND as_of_date >= ?"
+            params.append(start)
+        sql += " ORDER BY as_of DESC"
+        rows, cols = _execute(sql, params)
+        return [_row_to_analyst_rating(dict(zip(cols, r, strict=True))) for r in rows]
+
+    def latest_analyst_rating(self, symbol: str) -> AnalystRating | None:
+        """Most recent rating for ``symbol`` visible at the pinned decision time."""
+        results = self.analyst_ratings(symbol)
+        return results[0] if results else None
+
     # ── insider trades ────────────────────────────────────────────────────
 
     def insider_trades(
@@ -288,6 +322,25 @@ def _row_to_option_contract(row: dict[str, Any]) -> OptionContract:
         theta=row.get("theta"),
         vega=row.get("vega"),
         rho=row.get("rho"),
+        source=row["source"],
+    )
+
+
+def _row_to_analyst_rating(row: dict[str, Any]) -> AnalystRating:
+    return AnalystRating(
+        as_of=_ensure_utc(row["as_of"]),
+        symbol=row["symbol"],
+        rank=int(row["rank"]) if row.get("rank") is not None else None,
+        rank_text=row.get("rank_text"),
+        price_target=row.get("price_target"),
+        style_score_value=row.get("style_score_value"),
+        style_score_growth=row.get("style_score_growth"),
+        style_score_momentum=row.get("style_score_momentum"),
+        style_score_vgm=row.get("style_score_vgm"),
+        industry_rank=(
+            int(row["industry_rank"]) if row.get("industry_rank") is not None else None
+        ),
+        industry_rank_text=row.get("industry_rank_text"),
         source=row["source"],
     )
 
