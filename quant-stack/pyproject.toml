@@ -96,6 +96,10 @@ ignore = [
 # Registry uses lazy factories — late-bound imports inside functions are intentional
 # (decouples the registry module from the broker client modules).
 "ingestion/brokers/registry.py" = ["PLC0415"]
+# Scheduler lazy-imports each ingestion client in its tick methods so the
+# scheduler can be constructed and partially exercised even when one client's
+# dependencies aren't available (e.g. running narrow tests).
+"ingestion/scheduler.py" = ["PLC0415"]
 
 # ── Mypy ──────────────────────────────────────────────────────────────────
 [tool.mypy]
