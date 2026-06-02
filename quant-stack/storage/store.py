@@ -36,6 +36,7 @@ from ingestion.schema import (
     InsiderTrade,
     OptionContract,
     OptionsChainSnapshot,
+    SocialPost,
 )
 from storage import partition
 
@@ -122,6 +123,23 @@ _ANALYST_RATING_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("style_score_vgm", pa.string(), nullable=True),
         pa.field("industry_rank", pa.int64(), nullable=True),
         pa.field("industry_rank_text", pa.string(), nullable=True),
+        pa.field("source", pa.string(), nullable=False),
+    ]
+)
+
+_SOCIAL_POST_SCHEMA: Final[pa.Schema] = pa.schema(
+    [
+        pa.field("as_of", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("platform", pa.string(), nullable=False),
+        pa.field("post_id", pa.string(), nullable=False),
+        pa.field("author_handle", pa.string(), nullable=False),
+        pa.field("author_name", pa.string(), nullable=True),
+        pa.field("content", pa.string(), nullable=False),
+        pa.field("posted_at", pa.timestamp("us", tz="UTC"), nullable=True),
+        pa.field("url", pa.string(), nullable=True),
+        pa.field("reply_to", pa.string(), nullable=True),
+        pa.field("mentions", pa.list_(pa.string()), nullable=False),
+        pa.field("cashtags", pa.list_(pa.string()), nullable=False),
         pa.field("source", pa.string(), nullable=False),
     ]
 )
@@ -308,6 +326,49 @@ class ParquetStore:
                 files.append(path)
         return WriteResult(
             requested=len(actions_list),
+            persisted=total_persisted,
+            deduplicated=total_dedup,
+            rejected_schema=0,
+            files_touched=tuple(files),
+        )
+
+    def write_social_posts(self, posts: Iterable[SocialPost]) -> WriteResult:
+        """Persist social-media posts.
+
+        Grouped by (platform, author, year). Primary key for dedup:
+            (platform, author_handle, post_id).
+
+        rsshub gives stable guids per post, so the dedup key matches
+        what an external SocialPost would also produce.
+        """
+        posts_list = list(posts)
+        if not posts_list:
+            return WriteResult(0, 0, 0, 0)
+        groups: dict[tuple[str, str, int], list[SocialPost]] = {}
+        for p in posts_list:
+            year = (p.posted_at or p.as_of).year
+            key = (p.platform, p.author_handle.lstrip("@").upper(), year)
+            groups.setdefault(key, []).append(p)
+        total_persisted = 0
+        total_dedup = 0
+        files: list[Path] = []
+        for (platform, author, year), batch in groups.items():
+            path = partition.social_posts_file(
+                self._base, self._env, platform, author, year
+            )
+            persisted, dedup = self._upsert(
+                path,
+                batch,
+                _SOCIAL_POST_SCHEMA,
+                _social_post_to_record,
+                key_cols=("platform", "author_handle", "post_id"),
+            )
+            total_persisted += persisted
+            total_dedup += dedup
+            if persisted:
+                files.append(path)
+        return WriteResult(
+            requested=len(posts_list),
             persisted=total_persisted,
             deduplicated=total_dedup,
             rejected_schema=0,
@@ -575,6 +636,23 @@ def _corp_action_to_record(a: CorporateAction) -> dict[str, Any]:
         "ratio": a.ratio,
         "cash_amount": a.cash_amount,
         "source": a.source,
+    }
+
+
+def _social_post_to_record(p: SocialPost) -> dict[str, Any]:
+    return {
+        "as_of": p.as_of,
+        "platform": p.platform,
+        "post_id": p.post_id,
+        "author_handle": p.author_handle.lstrip("@").upper(),
+        "author_name": p.author_name,
+        "content": p.content,
+        "posted_at": p.posted_at,
+        "url": p.url,
+        "reply_to": p.reply_to,
+        "mentions": list(p.mentions),
+        "cashtags": list(p.cashtags),
+        "source": p.source,
     }
 
 

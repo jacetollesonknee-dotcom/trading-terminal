@@ -27,6 +27,7 @@ from ingestion.schema import (
     OptionContract,
     OptionRight,
     OptionsChainSnapshot,
+    SocialPost,
 )
 from storage import partition
 from storage.store import ParquetStore
@@ -183,6 +184,80 @@ class PointInTimeQuery:
         rows, cols = _execute(sql, params)
         return [_row_to_corp_action(dict(zip(cols, r, strict=True))) for r in rows]
 
+    # ── social posts ──────────────────────────────────────────────────────
+
+    def social_posts(
+        self,
+        author_handle: str,
+        *,
+        platform: str = "x",
+        start: date | None = None,
+        cashtag: str | None = None,
+        limit: int | None = None,
+    ) -> list[SocialPost]:
+        """Posts from ``author_handle`` on ``platform``, newest first.
+
+        Filtered to ``as_of <= decision_time`` like every other read.
+
+        :param cashtag: case-insensitive substring match against the cashtags
+            array (e.g. ``"NVDA"`` returns only posts mentioning $NVDA).
+        :param limit: cap the result set; the most-recent ``limit`` posts.
+        """
+        safe = author_handle.lstrip("@").upper()
+        author_root = partition.social_posts_author_root(
+            self._store.base_dir, self._store.env, platform, safe
+        )
+        if not author_root.exists() or not any(author_root.rglob("posts.parquet")):
+            return []
+        glob = _to_posix(author_root / "**" / "posts.parquet")
+        sql = (
+            "SELECT * FROM read_parquet(?, hive_partitioning=1) "
+            "WHERE as_of <= ? AND platform = ?"
+        )
+        params: list[Any] = [glob, self._as_of, platform.lower()]
+        if start is not None:
+            sql += " AND CAST(coalesce(posted_at, as_of) AS DATE) >= ?"
+            params.append(start)
+        if cashtag is not None:
+            sql += " AND list_contains(cashtags, ?)"
+            params.append(cashtag.upper())
+        sql += " ORDER BY coalesce(posted_at, as_of) DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows, cols = _execute(sql, params)
+        return [_row_to_social_post(dict(zip(cols, r, strict=True))) for r in rows]
+
+    def social_posts_mentioning(
+        self,
+        cashtag: str,
+        *,
+        platform: str = "x",
+        start: date | None = None,
+        limit: int | None = None,
+    ) -> list[SocialPost]:
+        """Cross-author search: every post mentioning ``cashtag`` on ``platform``."""
+        platform_root = partition.social_posts_platform_root(
+            self._store.base_dir, self._store.env, platform
+        )
+        if not platform_root.exists() or not any(platform_root.rglob("posts.parquet")):
+            return []
+        glob = _to_posix(platform_root / "**" / "posts.parquet")
+        sql = (
+            "SELECT * FROM read_parquet(?, hive_partitioning=1) "
+            "WHERE as_of <= ? AND platform = ? AND list_contains(cashtags, ?)"
+        )
+        params: list[Any] = [glob, self._as_of, platform.lower(), cashtag.upper()]
+        if start is not None:
+            sql += " AND CAST(coalesce(posted_at, as_of) AS DATE) >= ?"
+            params.append(start)
+        sql += " ORDER BY coalesce(posted_at, as_of) DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows, cols = _execute(sql, params)
+        return [_row_to_social_post(dict(zip(cols, r, strict=True))) for r in rows]
+
     # ── analyst ratings ───────────────────────────────────────────────────
 
     def analyst_ratings(
@@ -322,6 +397,24 @@ def _row_to_option_contract(row: dict[str, Any]) -> OptionContract:
         theta=row.get("theta"),
         vega=row.get("vega"),
         rho=row.get("rho"),
+        source=row["source"],
+    )
+
+
+def _row_to_social_post(row: dict[str, Any]) -> SocialPost:
+    posted = row.get("posted_at")
+    return SocialPost(
+        as_of=_ensure_utc(row["as_of"]),
+        platform=row["platform"],
+        post_id=row["post_id"],
+        author_handle=row["author_handle"],
+        author_name=row.get("author_name"),
+        content=row.get("content") or "",
+        posted_at=_ensure_utc(posted) if isinstance(posted, datetime) else None,
+        url=row.get("url"),
+        reply_to=row.get("reply_to"),
+        mentions=tuple(row.get("mentions") or ()),
+        cashtags=tuple(row.get("cashtags") or ()),
         source=row["source"],
     )
 

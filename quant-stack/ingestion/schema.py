@@ -222,6 +222,46 @@ class EarningsEvent(_ImmutableModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class SocialPost(_ImmutableModel):
+    """One social-media post (X / Twitter for v1).
+
+    Source v1: rsshub.app — free public RSS proxy for X. The engine is
+    polite (5-minute polling cadence). When the operator runs their own
+    rsshub instance, swap the base URL via settings.
+
+    Primary key for dedup: (platform, author_handle, post_id). post_id
+    comes from the RSS guid which is stable per-post on rsshub.
+    """
+
+    as_of: _AsOf
+    platform: Literal["x"]
+    post_id: str = Field(min_length=1)
+    author_handle: str = Field(min_length=1, max_length=64)
+    author_name: str | None = None
+    content: str = ""
+    posted_at: datetime | None = None  # UTC; None if RSS pubDate unparseable
+    url: str | None = None
+    reply_to: str | None = None
+    mentions: tuple[str, ...] = Field(default_factory=tuple)
+    cashtags: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Tickers detected in the post (e.g. '$NVDA' → 'NVDA').",
+    )
+    source: Literal["rsshub"]
+
+    @field_validator("as_of")
+    @classmethod
+    def _utc(cls, v: datetime) -> datetime:
+        return _ensure_utc(v)
+
+    @field_validator("posted_at")
+    @classmethod
+    def _posted_utc(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return None
+        return _ensure_utc(v)
+
+
 class AnalystRating(_ImmutableModel):
     """A single analyst-firm rating snapshot for one ticker.
 

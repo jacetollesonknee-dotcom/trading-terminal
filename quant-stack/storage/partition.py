@@ -22,6 +22,7 @@ _CORP_ACTIONS: Final[str] = "corporate_actions"
 _EARNINGS: Final[str] = "earnings"
 _INSIDER_TRADES: Final[str] = "insider_trades"
 _ANALYST_RATINGS: Final[str] = "analyst_ratings"
+_SOCIAL_POSTS: Final[str] = "social_posts"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,6 +104,35 @@ def analyst_ratings_symbol_root(base_dir: Path, env: str, symbol: str) -> Path:
     return base_dir / env / _ANALYST_RATINGS / symbol.upper()
 
 
+def social_posts_file(
+    base_dir: Path, env: str, platform: str, author_handle: str, year: int
+) -> Path:
+    """One file per (platform, author, year) for social posts."""
+    safe = _sanitise_handle(author_handle)
+    return (
+        base_dir / env / _SOCIAL_POSTS / platform.lower() / safe
+        / f"year={year}" / "posts.parquet"
+    )
+
+
+def social_posts_author_root(
+    base_dir: Path, env: str, platform: str, author_handle: str
+) -> Path:
+    """Root of all years for one author's posts on one platform."""
+    safe = _sanitise_handle(author_handle)
+    return base_dir / env / _SOCIAL_POSTS / platform.lower() / safe
+
+
+def social_posts_platform_root(base_dir: Path, env: str, platform: str) -> Path:
+    """Root of all authors for one platform."""
+    return base_dir / env / _SOCIAL_POSTS / platform.lower()
+
+
+def _sanitise_handle(handle: str) -> str:
+    """Make a handle safe for the filesystem. Strips '@' and uppercases."""
+    return handle.lstrip("@").upper()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Scanners — return existing parquet paths for DuckDB to read across
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,3 +180,10 @@ def scan_analyst_ratings_files(base_dir: Path, env: str) -> list[Path]:
     if not root.exists():
         return []
     return sorted(root.rglob("ratings.parquet"))
+
+
+def scan_social_posts_files(base_dir: Path, env: str) -> list[Path]:
+    root = base_dir / env / _SOCIAL_POSTS
+    if not root.exists():
+        return []
+    return sorted(root.rglob("posts.parquet"))
