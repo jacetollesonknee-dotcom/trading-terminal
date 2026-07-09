@@ -29,6 +29,7 @@ from ai_engine import (
     OPUS,
     THINKING_BUDGET_QUICK,
 )
+from engine_bridge import EngineBridge
 
 load_dotenv()
 
@@ -42,12 +43,19 @@ USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "true").lower() == "true"
 INITIAL_CASH = float(os.getenv("INITIAL_CASH", "30000"))
 STATE_PATH = Path(os.getenv("STATE_PATH", "trader_state.json"))
 PORT = int(os.getenv("PORT", "5000"))
+# ADR-004: the terminal streams the engine's real-time ingestion scheduler.
+# Default on; flip ENGINE_SCHEDULER=false to run on data_feeds alone.
+ENGINE_SCHEDULER = os.getenv("ENGINE_SCHEDULER", "true").lower() == "true"
 
 # ── App ──────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.secret_key = os.urandom(32)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 ai_engine = AIAnalysisEngine(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+engine = EngineBridge(
+    enabled=ENGINE_SCHEDULER,
+    watchlist=("AAPL", "NVDA", "TSLA", "SPY", "QQQ", "MSFT"),
+)
 
 # ── State ────────────────────────────────────────────────────────────────
 _state_lock = threading.Lock()
@@ -722,6 +730,8 @@ def api_watchlist():
             if sym in wl:
                 wl.remove(sym)
     _save_state()
+    # Keep the engine scheduler polling exactly the terminal's watchlist.
+    engine.set_watchlist(state["watchlist"])
     return jsonify({"watchlist": state["watchlist"]})
 
 
@@ -779,6 +789,10 @@ def api_insider():
 
 @app.route("/api/insider/<symbol>")
 def api_insider_symbol(symbol):
+    # Engine store first (point-in-time, deduped); live scrape as fallback.
+    trades = engine.insider(symbol)
+    if trades:
+        return jsonify(trades)
     return jsonify(data_feeds.openinsider_latest(symbol))
 
 
@@ -790,6 +804,31 @@ def api_insider_top():
 @app.route("/api/zacks/<symbol>")
 def api_zacks(symbol):
     return jsonify(data_feeds.zacks_rating(symbol))
+
+
+# ── Engine ingestion surface (ADR-004 Phase 7.5) ──
+@app.route("/api/engine/status")
+def api_engine_status():
+    """Live state of the engine's real-time ingestion scheduler."""
+    return jsonify(engine.status())
+
+
+@app.route("/api/sentiment/<symbol>")
+def api_sentiment(symbol):
+    """X/social posts mentioning $symbol, served from the engine store.
+
+    Falls back to the terminal's own aggregated headlines when the engine
+    has no posts yet (fresh install, x source disabled, etc.).
+    """
+    posts = engine.sentiment(symbol)
+    if posts:
+        return jsonify({"symbol": symbol.upper(), "source": "engine", "posts": posts})
+    return jsonify({
+        "symbol": symbol.upper(),
+        "source": "fallback",
+        "posts": [],
+        "news": data_feeds.news_for_symbol(symbol)[:10],
+    })
 
 
 @app.route("/api/kalshi")
@@ -946,6 +985,14 @@ if __name__ == "__main__":
     print("=" * 64)
     if DEMO_MODE:
         print("\n  Schwab API pending — ready for connection.")
+    # Start the engine's real-time ingestion scheduler; emits stream to the
+    # browser as `ingestion_update` SocketIO events (ADR-004 Phase 7.5).
+    if engine.start(lambda name, payload: socketio.emit(name, payload)):
+        engine.set_watchlist(state.get("watchlist", []))
+        print("  Engine:  ingestion scheduler LIVE "
+              f"(yahoo/openinsider/zacks → {engine.status()['env']})")
+    elif ENGINE_SCHEDULER:
+        print(f"  Engine:  scheduler unavailable — {engine.status()['import_error']}")
     print(f"  Opening browser at http://127.0.0.1:{PORT}\n")
     threading.Thread(target=update_prices_loop, daemon=True).start()
     threading.Timer(1.5, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()

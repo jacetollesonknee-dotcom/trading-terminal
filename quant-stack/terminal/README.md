@@ -56,6 +56,33 @@ cd terminal && python main.py
 `requirements.txt` is kept as a frozen mirror for the standalone path; the
 canonical source is `pyproject.toml`'s `[terminal]` extra.
 
+## Engine integration (ADR-004 Phase 7.5)
+
+The terminal consumes the quant-stack engine **in-process** via
+`engine_bridge.py`. On boot it starts the engine's `IngestionScheduler`
+(yahoo / openinsider / zacks, and x when enabled), which polls each source
+on its own cadence, persists deduped records to the point-in-time parquet
+store, and streams every poll cycle to the browser as an `ingestion_update`
+SocketIO event. The **Sentiment** panel surfaces this live in the *Live
+Ingestion* card plus a *Social Buzz* card backed by the engine's stored X
+posts.
+
+New surfaces:
+
+| Route | Serves |
+|---|---|
+| `GET /api/engine/status` | scheduler availability + running state + watchlist |
+| `GET /api/sentiment/<sym>` | stored X/social posts for `$sym` (falls back to headlines) |
+| `GET /api/insider/<sym>` | engine store first (point-in-time, deduped), live scrape as fallback |
+| SocketIO `ingestion_update` | per-poll event stream from the scheduler |
+
+The bridge **degrades gracefully**: if the engine deps aren't importable or
+`ENGINE_SCHEDULER=false`, every engine-backed route falls back to the
+terminal's own `data_feeds.py` and the app runs unchanged. The reusable,
+tested piece of this integration lives in the engine
+(`ingestion/serialize.py`) so it's covered by the engine's gates; the
+terminal side is thin glue.
+
 ## Why this isn't in the engine's strict CI
 
 The terminal is pre-existing prototype code. It doesn't carry `mypy --strict`

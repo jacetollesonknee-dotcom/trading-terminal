@@ -440,6 +440,26 @@
             <div id="trendingContent"><div class="loading"><span class="spinner"></span></div></div>
           </div>
         </div>
+        <div class="grid-2" style="margin-top:16px">
+          <div class="card">
+            <div class="card-title"><span class="icon">🐦</span> Social Buzz
+              <span id="sentimentSym" style="margin-left:8px;color:var(--muted);font-size:12px"></span>
+              <button class="btn-sm btn-outline" onclick="loadSentiment()" style="margin-left:auto">Refresh</button>
+            </div>
+            <div id="sentimentContent" style="max-height:340px;overflow-y:auto">
+              <div style="color:var(--muted)">Select a symbol to see X / social mentions.</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title"><span class="icon">📡</span> Live Ingestion
+              <span id="engineDot" class="status-dot demo" style="margin-left:8px"></span>
+              <span id="engineState" style="color:var(--muted);font-size:12px">checking…</span>
+            </div>
+            <div id="ingestionFeed" style="max-height:340px;overflow-y:auto;font-size:12px">
+              <div style="color:var(--muted)">Waiting for the engine scheduler…</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- ════ PORTFOLIO ════ -->
@@ -593,7 +613,7 @@ function showPanel(name) {
   if (name === 'news') loadNews();
   if (name === 'insider') loadInsider();
   if (name === 'kalshi') loadKalshi();
-  if (name === 'sentiment') { loadFearGreed('fgContent'); loadTrending(); }
+  if (name === 'sentiment') { loadFearGreed('fgContent'); loadTrending(); loadSentiment(); loadEngineStatus(); }
   if (name === 'portfolio') loadPortfolio();
   if (name === 'alerts') loadAlerts();
 }
@@ -798,6 +818,66 @@ function renderInsiderTable(trades, targetId) {
         <td>${t.price || ''}</td>
         <td>${t.value || ''}</td>
       </tr>`; }).join('') + '</tbody></table>';
+}
+
+/* ── Sentiment / social buzz (engine X source) ── */
+function loadSentiment() {
+  const sym = currentSymbol;
+  document.getElementById('sentimentSym').textContent = '$' + sym;
+  const el = document.getElementById('sentimentContent');
+  el.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+  fetch(API + '/api/sentiment/' + sym).then(r => r.json()).then(d => {
+    const posts = d.posts || [];
+    if (posts.length) {
+      el.innerHTML = posts.map(p => `
+        <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+          <div><b>@${escapeHtml(p.author_handle || '')}</b>
+            <small style="color:var(--muted)">${(p.posted_at || '').substring(0,16).replace('T',' ')}</small></div>
+          <div style="margin-top:2px">${escapeHtml((p.content || '').substring(0,240))}</div>
+          ${p.url ? `<a href="${p.url}" target="_blank" style="font-size:11px">view</a>` : ''}
+        </div>`).join('');
+      return;
+    }
+    // Fallback: engine has no X posts yet — show recent headlines.
+    const news = d.news || [];
+    if (news.length) {
+      el.innerHTML = '<div style="color:var(--muted);margin-bottom:6px;font-size:11px">No X posts stored yet — showing headlines.</div>' +
+        news.map(n => `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+          <a href="${n.link || n.url || '#'}" target="_blank">${escapeHtml(n.title || '')}</a></div>`).join('');
+    } else {
+      el.innerHTML = '<div style="color:var(--muted)">No social mentions found for $' + sym + '.</div>';
+    }
+  }).catch(() => { el.innerHTML = '<div style="color:var(--muted)">Could not load social buzz.</div>'; });
+}
+
+/* ── Live ingestion (engine scheduler stream) ── */
+function loadEngineStatus() {
+  fetch(API + '/api/engine/status').then(r => r.json()).then(s => {
+    const dot = document.getElementById('engineDot');
+    const label = document.getElementById('engineState');
+    if (s.running) { dot.className = 'status-dot live'; label.textContent = 'streaming · ' + (s.env || ''); }
+    else if (s.available) { dot.className = 'status-dot demo'; label.textContent = 'ready (idle)'; }
+    else { dot.className = 'status-dot demo'; label.textContent = s.enabled ? 'unavailable' : 'disabled'; }
+  }).catch(() => {});
+}
+
+const _ingestionLog = [];
+function recordIngestion(ev) {
+  const when = (ev.triggered_at || '').substring(11, 19);
+  const w = ev.write || {};
+  const summary = ev.ok
+    ? `<span style="color:var(--green)">✓</span> <b>${ev.source}</b> ${ev.detail || ''} `
+      + `<small style="color:var(--muted)">+${w.persisted || 0} new / ${w.deduplicated || 0} dup</small>`
+    : `<span style="color:var(--red)">✗</span> <b>${ev.source}</b> ${ev.detail || ''} `
+      + `<small style="color:var(--red)">${escapeHtml((ev.error_message || 'error').substring(0,60))}</small>`;
+  _ingestionLog.unshift(`<div style="padding:4px 0;border-bottom:1px solid var(--border)">
+    <small style="color:var(--muted)">${when}</small> ${summary}</div>`);
+  _ingestionLog.splice(50);
+  const feed = document.getElementById('ingestionFeed');
+  if (feed) feed.innerHTML = _ingestionLog.join('');
+  const dot = document.getElementById('engineDot');
+  const label = document.getElementById('engineState');
+  if (dot && label) { dot.className = 'status-dot live'; label.textContent = 'streaming'; }
 }
 
 /* ── Kalshi ── */
@@ -1405,6 +1485,7 @@ socket.on('portfolio_update', () => {
       document.getElementById('panel-dashboard').classList.contains('active')) loadPortfolio();
 });
 socket.on('quotes_update', quotes => { renderWatchlist(quotes); });
+socket.on('ingestion_update', ev => { recordIngestion(ev); });
 socket.on('alert', a => {
   toast('🔔 ' + a.symbol + ' ' + a.type + ' $' + parseFloat(a.level).toFixed(2), 'success');
   if (document.getElementById('panel-alerts').classList.contains('active')) loadAlerts();
