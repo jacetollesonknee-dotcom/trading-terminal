@@ -120,6 +120,9 @@ namespace_packages = true
 module = [
     "hmmlearn.*", "QuantLib.*", "arch.*", "statsmodels.*", "keyring.*",
     "pyarrow.*", "duckdb.*", "filelock.*", "hypothesis.*",
+    # terminal/ is excluded from type-checking (see exclude above); the
+    # bridge test imports it via sys.path, so tell mypy not to chase it.
+    "engine_bridge",
 ]
 ignore_missing_imports = true
 

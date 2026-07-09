@@ -803,6 +803,10 @@ def api_insider_top():
 
 @app.route("/api/zacks/<symbol>")
 def api_zacks(symbol):
+    # Engine store first (point-in-time, deduped); live scrape as fallback.
+    rating = engine.zacks(symbol)
+    if rating is not None:
+        return jsonify(rating)
     return jsonify(data_feeds.zacks_rating(symbol))
 
 

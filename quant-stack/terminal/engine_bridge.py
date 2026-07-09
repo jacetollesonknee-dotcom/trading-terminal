@@ -175,6 +175,22 @@ class EngineBridge:
             return []
         return [_insider_to_row(t) for t in trades[:limit]]
 
+    def zacks(self, symbol: str) -> dict[str, Any] | None:
+        """Latest Zacks rating for ``symbol``, shaped for the terminal card.
+
+        Returns ``None`` when the engine is unavailable or has no rating yet,
+        so the route falls back to the live ``data_feeds.zacks_rating`` scrape.
+        The output mirrors that scrape's keys (``zacks_rank`` / ``rank_text`` /
+        ``price_target`` / ``stats``) so the front-end renders identically.
+        """
+        if not self.available:
+            return None
+        try:
+            rating = self._query().latest_analyst_rating(symbol.upper())
+        except Exception:  # noqa: BLE001
+            return None
+        return _rating_to_zacks(rating) if rating is not None else None
+
     # ── status (for /api/engine/status) ───────────────────────────────────
 
     def status(self) -> dict[str, Any]:
@@ -187,6 +203,31 @@ class EngineBridge:
             "watchlist": list(self._scheduler.watchlist()) if self._scheduler else [],
             "import_error": self._import_error,
         }
+
+
+def _rating_to_zacks(rating: Any) -> dict[str, Any]:
+    """Map an engine ``AnalystRating`` to the terminal's Zacks-card shape."""
+    stats: dict[str, str] = {}
+    if rating.style_score_value:
+        stats["Value"] = rating.style_score_value
+    if rating.style_score_growth:
+        stats["Growth"] = rating.style_score_growth
+    if rating.style_score_momentum:
+        stats["Momentum"] = rating.style_score_momentum
+    if rating.style_score_vgm:
+        stats["VGM"] = rating.style_score_vgm
+    if rating.industry_rank_text:
+        stats["Industry Rank"] = rating.industry_rank_text
+    return {
+        "symbol": rating.symbol,
+        "zacks_rank": str(rating.rank) if rating.rank is not None else "N/A",
+        "rank_text": rating.rank_text or "",
+        "price_target": (
+            f"${rating.price_target:,.2f}" if rating.price_target is not None else None
+        ),
+        "stats": stats,
+        "source": "engine",
+    }
 
 
 def _insider_to_row(trade: Any) -> dict[str, Any]:
