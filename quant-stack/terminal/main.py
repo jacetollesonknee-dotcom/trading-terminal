@@ -876,6 +876,18 @@ def api_fundamentals(symbol):
 def api_research(symbol):
     research = data_feeds.full_research(symbol)
     research["signals"] = get_signals(symbol)
+    # Engine-first overlay (ADR-004): prefer the point-in-time store's deduped
+    # zacks / insider / social data where it exists; the scraped values from
+    # full_research remain the fallback. data_feeds stays engine-agnostic.
+    z = engine.zacks(symbol)
+    if z is not None:
+        research["zacks"] = z
+    trades = engine.insider(symbol)
+    if trades:
+        research["insider_trades"] = trades
+    posts = engine.sentiment(symbol)
+    if posts:
+        research["sentiment"] = posts
     return jsonify(research)
 
 

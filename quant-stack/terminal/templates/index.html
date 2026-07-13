@@ -1361,6 +1361,17 @@ function renderResearch(data) {
   }
   html += '</div>';
 
+  const posts = data.sentiment || [];
+  if (posts.length) {
+    html += '<div class="card"><div class="card-title"><span class="icon">🐦</span> Social Buzz <small style="color:var(--muted);font-weight:400">engine</small></div>';
+    posts.slice(0, 6).forEach(p => {
+      html += '<div style="padding:6px 0;border-bottom:1px solid var(--border)">' +
+        '<b>@' + escapeHtml(p.author_handle || '') + '</b> ' +
+        '<span>' + escapeHtml((p.content || '').substring(0, 180)) + '</span></div>';
+    });
+    html += '</div>';
+  }
+
   const news = data.news || [];
   html += '<div class="card"><div class="card-title"><span class="icon">📰</span> Latest News</div>';
   if (!news.length || news[0]?.error) {
