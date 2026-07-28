@@ -824,6 +824,34 @@ def api_fear_greed():
     return jsonify(data_feeds.fear_greed_index())
 
 
+@app.route("/api/macro")
+def api_macro():
+    return jsonify(data_feeds.macro_dashboard())
+
+
+@app.route("/api/sectors")
+def api_sectors():
+    return jsonify(data_feeds.sector_rotation())
+
+
+@app.route("/api/ai/macro-brief")
+def api_ai_macro_brief():
+    if not ai_engine:
+        return jsonify({"error": "ANTHROPIC_API_KEY not set"}), 400
+    result = ai_engine.macro_brief()
+    return jsonify({"brief": result, "model": DEFAULT_MODEL,
+                    "timestamp": datetime.now().isoformat()})
+
+
+@app.route("/api/ai/explain-indicator/<symbol>")
+def api_ai_explain_indicator(symbol):
+    if not ai_engine:
+        return jsonify({"error": "ANTHROPIC_API_KEY not set"}), 400
+    result = ai_engine.explain_indicator(symbol)
+    return jsonify({"symbol": symbol, "explanation": result, "model": FAST_MODEL,
+                    "timestamp": datetime.now().isoformat()})
+
+
 @app.route("/api/fundamentals/<symbol>")
 def api_fundamentals(symbol):
     return jsonify(data_feeds.yahoo_fundamentals(symbol))

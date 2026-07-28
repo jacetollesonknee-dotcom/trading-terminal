@@ -556,3 +556,115 @@ Be punchy. Numbers, not adjectives.""",
             thinking_budget=THINKING_BUDGET_QUICK,
             max_tokens=MAX_TOKENS_STD,
         )
+
+    # ── MACRO RADAR ───────────────────────────────────────────────────
+    def macro_brief(self) -> str:
+        """Morning cross-asset sentiment read: where is the market leaning and why."""
+        data: dict = {}
+        tasks = [
+            ("macro",   data_feeds.macro_dashboard, ()),
+            ("sectors", data_feeds.sector_rotation, ()),
+            ("fear_greed", data_feeds.fear_greed_index, ()),
+            ("news",    data_feeds.aggregate_news, (14,)),
+        ]
+        futures = {self._executor.submit(fn, *args): key for key, fn, args in tasks}
+        for fut in as_completed(futures, timeout=25):
+            key = futures[fut]
+            try:
+                data[key] = fut.result()
+            except Exception as e:  # noqa: BLE001
+                data[key] = {"error": str(e)}
+
+        macro = data.get("macro", {}) or {}
+        sectors = data.get("sectors", {}) or {}
+        compact = {
+            "cross_asset_tilt": macro.get("tilt"),
+            "tilt_score": macro.get("tilt_score"),
+            "indicators": [
+                {"name": ind.get("name"), "change_pct": ind.get("change_pct"),
+                 "price": ind.get("price"), "bias": ind.get("bias"), "hot": ind.get("hot")}
+                for g in macro.get("groups", []) for ind in g.get("indicators", [])
+            ],
+            "sector_leadership": sectors.get("leadership"),
+            "sectors_ranked": [
+                {"name": s.get("name"), "change_pct": s.get("change_pct"),
+                 "vol_ratio": s.get("vol_ratio")}
+                for s in sectors.get("sectors", [])
+            ],
+            "fear_greed": data.get("fear_greed", {}),
+            "top_headlines": [
+                {"title": n.get("title"), "source": n.get("source")}
+                for n in (data.get("news") or [])[:12] if isinstance(n, dict)
+            ],
+        }
+
+        return self._call_claude(
+            """You are the morning macro strategist on a global-macro desk. From the cross-asset
+board below, tell the operator where the market is leaning and WHY. Connect the signals to each
+other — don't just list them.
+
+# THE TAPE RIGHT NOW
+2-3 sentences. Overall risk-on / risk-off / mixed read and the single biggest driver.
+
+# WHAT THE CROSS-ASSET SIGNALS ARE SAYING
+Bullets. Group the story: volatility (VIX/VVIX), rates & the dollar, commodities (oil/gold/copper),
+and the overnight session (Japan/Korea/HK). For each, say what the move IMPLIES for US equities today.
+Call out any DIVERGENCE (e.g. stocks up but HYG/credit down, or gold up with yields up) — those matter most.
+
+# SECTOR ROTATION
+Which sectors money is rotating INTO vs OUT of, and whether volume confirms it (conviction vs drift).
+Say whether leadership is offensive (cyclicals) or defensive — and what that implies.
+
+# WHAT TO WATCH TODAY
+2-3 bullets. The levels/events that would flip the read.
+
+Be concrete. Numbers over adjectives. This is a briefing, not an essay.""",
+            f"Cross-asset board ({datetime.now().strftime('%Y-%m-%d %H:%M')}):\n"
+            f"{json.dumps(compact, indent=2, default=str)}",
+            thinking_budget=THINKING_BUDGET_QUICK,
+            max_tokens=MAX_TOKENS_STD,
+        )
+
+    def explain_indicator(self, symbol: str) -> str:
+        """Explain what ONE indicator's live reading means for market direction right now."""
+        macro = data_feeds.macro_dashboard()
+        spec = data_feeds.MACRO_SPECS.get(symbol.upper()) or data_feeds.MACRO_SPECS.get(symbol)
+        if not spec:
+            return f"[Unknown indicator: {symbol}]"
+        live = None
+        for g in macro.get("groups", []):
+            for ind in g.get("indicators", []):
+                if ind.get("symbol") == spec.get("symbol"):
+                    live = ind
+                    break
+            if live:
+                break
+
+        payload = {
+            "indicator": spec.get("name"),
+            "group": spec.get("group"),
+            "how_it_is_read": spec.get("read"),
+            "live": {
+                "price": (live or {}).get("price"),
+                "change_pct": (live or {}).get("change_pct"),
+                "bias": (live or {}).get("bias"),
+            },
+            "board_tilt": macro.get("tilt"),
+            "peers": [
+                {"name": ind.get("name"), "change_pct": ind.get("change_pct")}
+                for g in macro.get("groups", []) for ind in g.get("indicators", [])
+                if ind.get("symbol") != spec.get("symbol")
+            ][:12],
+        }
+        return self._call_claude(
+            """You explain ONE macro indicator to an active trader, in plain English, in ~120 words.
+Given its live reading and the rest of the board, answer three things:
+1. WHAT this indicator's move is telling us right now (risk-on / risk-off / neutral and how strong).
+2. WHY it moves the market — the transmission mechanism to US stocks.
+3. WHAT it means for positioning today, and one thing that would change the read.
+No preamble, no headers. Tight, specific, numbers where useful.""",
+            json.dumps(payload, indent=2, default=str),
+            model=FAST_MODEL,
+            thinking_budget=None,
+            max_tokens=MAX_TOKENS_QUICK,
+        )

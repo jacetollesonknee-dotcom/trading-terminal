@@ -120,6 +120,35 @@
   @media (max-width: 1100px) { .grid-3, .grid-4 { grid-template-columns:1fr 1fr; } }
   @media (max-width: 700px) { .grid-2, .grid-3, .grid-4 { grid-template-columns:1fr; } }
 
+  /* ── Macro radar ── */
+  .macro-tilt { font-size:11px; font-weight:700; padding:4px 12px; border-radius:20px;
+    background:var(--bg3); border:1px solid var(--border); text-transform:uppercase; letter-spacing:0.05em; }
+  .macro-tilt.risk-on  { background:rgba(0,214,143,0.14); color:var(--green); border-color:rgba(0,214,143,0.3); }
+  .macro-tilt.risk-off { background:rgba(255,71,87,0.14); color:var(--red); border-color:rgba(255,71,87,0.3); }
+  .macro-tilt.mixed    { background:rgba(255,160,64,0.14); color:var(--amber); border-color:rgba(255,160,64,0.3); }
+  .ind-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px,1fr)); gap:10px; }
+  .ind { background:var(--bg2); border:1px solid var(--border); border-left-width:3px; border-radius:10px; padding:12px 14px; }
+  .ind.on  { border-left-color:var(--green); }
+  .ind.off { border-left-color:var(--red); }
+  .ind.neutral { border-left-color:var(--muted); }
+  .ind-top { display:flex; align-items:baseline; gap:8px; }
+  .ind-name { font-size:12px; font-weight:600; }
+  .ind-hot { font-size:9px; background:rgba(255,71,87,0.16); color:var(--red); padding:1px 6px; border-radius:8px; margin-left:auto; }
+  .ind-val { font-size:19px; font-weight:700; margin:4px 0 2px; }
+  .ind-chg { font-size:12px; font-weight:600; }
+  .ind-explain { margin-top:8px; font-size:10px; color:var(--purple); cursor:pointer; user-select:none; }
+  .ind-explain:hover { text-decoration:underline; }
+  .ind-explanation { margin-top:8px; font-size:11px; line-height:1.55; color:var(--muted2);
+    border-top:1px solid var(--border); padding-top:8px; }
+  .grp-title { font-size:11px; font-weight:700; color:var(--cyan); text-transform:uppercase;
+    letter-spacing:0.06em; margin:16px 0 8px; }
+  .sector-row { display:grid; grid-template-columns:150px 1fr 70px 64px; align-items:center; gap:10px;
+    padding:5px 0; font-size:11px; border-bottom:1px solid var(--border); }
+  .sector-bar-wrap { background:var(--bg3); border-radius:4px; height:14px; position:relative; overflow:hidden; }
+  .sector-bar { height:100%; border-radius:4px; }
+  .tag-def { font-size:8px; color:var(--amber); border:1px solid rgba(255,160,64,0.3); border-radius:4px; padding:0 4px; margin-left:4px; }
+  .tag-cyc { font-size:8px; color:var(--cyan); border:1px solid rgba(0,212,255,0.3); border-radius:4px; padding:0 4px; margin-left:4px; }
+
   .quote-header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 16px; flex-wrap:wrap; }
   .quote-symbol { font-size: 26px; font-weight: 800; }
   .quote-price  { font-size: 24px; font-weight: 700; }
@@ -233,6 +262,7 @@
 
     <div class="sidebar-section">Markets</div>
     <div class="nav-item active" data-panel="dashboard"><span class="nav-icon">📊</span> Dashboard</div>
+    <div class="nav-item" data-panel="macro"><span class="nav-icon">🛰️</span> Macro Radar <span class="nav-badge">LIVE</span></div>
     <div class="nav-item" data-panel="quote"><span class="nav-icon">📈</span> Quote &amp; Chart</div>
     <div class="nav-item" data-panel="research"><span class="nav-icon">🔬</span> Deep Research</div>
 
@@ -344,6 +374,37 @@
             <div class="card-title"><span class="icon">🧠</span> Fear &amp; Greed Index</div>
             <div id="dashFearGreed"><div class="loading"><span class="spinner"></span></div></div>
           </div>
+        </div>
+      </div>
+
+      <!-- ════ MACRO RADAR ════ -->
+      <div class="panel" id="panel-macro">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+          <div style="font-size:16px;font-weight:700">🛰️ Macro Radar</div>
+          <span id="macroTilt" class="macro-tilt">reading the tape…</span>
+          <span style="font-size:10px;color:var(--muted)" id="macroAsOf"></span>
+          <button class="btn-outline" style="margin-left:auto" onclick="loadMacroAll(true)">↻ Refresh</button>
+        </div>
+
+        <div class="card" style="border-color:var(--amber)">
+          <div class="card-title"><span class="icon">☀️</span> Morning Macro Sentiment — AI Brief
+            <button class="btn" style="margin-left:auto;padding:5px 12px;font-size:10px" onclick="loadMacroBrief()">Generate Brief</button>
+          </div>
+          <div id="macroBrief" style="line-height:1.7;font-size:12px;color:var(--muted2)">
+            Click <strong>Generate Brief</strong> for an AI read on where the market is leaning this morning and why — tying volatility, rates, the dollar, commodities and the overnight session together.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="icon">🔄</span> Sector Rotation — by performance &amp; volume conviction</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px" id="sectorLeadership"></div>
+          <div id="sectorContent"><div class="loading"><span class="spinner"></span><br>Loading sectors...</div></div>
+        </div>
+
+        <div id="macroGroups"><div class="loading"><span class="spinner"></span><br>Loading cross-asset indicators...</div></div>
+
+        <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.6">
+          Tip: click any indicator's <strong>Explain</strong> to get a plain-English read of what that move means for market direction right now. Data via Yahoo Finance · Bias is a heuristic tilt, not advice.
         </div>
       </div>
 
@@ -590,6 +651,7 @@ function showPanel(name) {
   document.querySelectorAll('.nav-item').forEach(n => {
     if (n.dataset.panel === name) n.classList.add('active');
   });
+  if (name === 'macro') loadMacroAll();
   if (name === 'news') loadNews();
   if (name === 'insider') loadInsider();
   if (name === 'kalshi') loadKalshi();
@@ -1190,6 +1252,118 @@ function runQuickAnalysis() {
       '<div class="card-title"><span class="icon">⚡</span> Quick Analysis — ' + symbol + '</div>' +
       '<div style="line-height:1.7;font-size:12px">' + formatChat(data.analysis || data.error || '') + '</div></div>';
   });
+}
+
+/* ── Macro Radar ── */
+let _macroLoaded = false;
+function loadMacroAll(force) {
+  if (_macroLoaded && !force) return;
+  _macroLoaded = true;
+  loadMacro();
+  loadSectors();
+}
+
+function fmtIndVal(ind) {
+  const v = ind.price;
+  if (v === null || v === undefined) return '--';
+  const unit = ind.unit || '';
+  if (unit === '%') return v.toFixed(2) + '%';
+  if (unit === '$') return '$' + Number(v).toLocaleString(undefined, {maximumFractionDigits: 2});
+  return Number(v).toLocaleString(undefined, {maximumFractionDigits: 2});
+}
+
+function loadMacro() {
+  const el = document.getElementById('macroGroups');
+  fetch(API + '/api/macro').then(r => r.json()).then(data => {
+    const tilt = (data.tilt || 'neutral');
+    const badge = document.getElementById('macroTilt');
+    badge.className = 'macro-tilt ' + (tilt === 'risk-on' ? 'risk-on' : tilt === 'risk-off' ? 'risk-off' : 'mixed');
+    const arrow = tilt === 'risk-on' ? '▲' : tilt === 'risk-off' ? '▼' : '◆';
+    badge.textContent = arrow + ' ' + tilt.replace('-', ' ') +
+      '  (' + (data.tally ? (data.tally['risk-on'] + ' on / ' + data.tally['risk-off'] + ' off') : '') + ')';
+    if (data.as_of) document.getElementById('macroAsOf').textContent =
+      'as of ' + new Date(data.as_of).toLocaleTimeString();
+
+    if (!data.groups || !data.groups.length) {
+      el.innerHTML = '<div class="card" style="color:var(--muted)">No indicator data available right now.</div>';
+      return;
+    }
+    el.innerHTML = data.groups.map(g => {
+      const cards = g.indicators.map(ind => {
+        const cls = ind.bias === 'risk-on' ? 'on' : ind.bias === 'risk-off' ? 'off' : 'neutral';
+        const chgCls = (ind.change_pct || 0) > 0 ? 'up' : (ind.change_pct || 0) < 0 ? 'down' : 'flat';
+        const sign = (ind.change_pct || 0) > 0 ? '+' : '';
+        const eid = 'expl-' + ind.symbol.replace(/[^a-zA-Z0-9]/g, '_');
+        return '<div class="ind ' + cls + '">' +
+          '<div class="ind-top"><span class="ind-name">' + ind.name + '</span>' +
+            (ind.hot ? '<span class="ind-hot">⚠ ' + (ind.bias === 'risk-off' ? 'STRESS' : 'HOT') + '</span>' : '') +
+          '</div>' +
+          '<div class="ind-val">' + fmtIndVal(ind) + '</div>' +
+          '<div class="ind-chg ' + chgCls + '">' + sign + (ind.change_pct || 0).toFixed(2) + '% today</div>' +
+          '<div class="ind-explain" onclick="explainIndicator(\'' + ind.symbol + '\',\'' + eid + '\')">💡 Explain what this means →</div>' +
+          '<div class="ind-explanation" id="' + eid + '" style="display:none"></div>' +
+        '</div>';
+      }).join('');
+      return '<div class="grp-title">' + g.group + '</div><div class="ind-grid">' + cards + '</div>';
+    }).join('');
+  }).catch(e => el.innerHTML = '<div class="card" style="color:var(--red)">Error loading indicators: ' + e + '</div>');
+}
+
+function explainIndicator(symbol, eid) {
+  const box = document.getElementById(eid);
+  if (!box) return;
+  if (box.style.display === 'block' && box.dataset.loaded === '1') {
+    box.style.display = 'none'; box.dataset.loaded = '0'; return;
+  }
+  box.style.display = 'block';
+  box.innerHTML = '<span class="spinner"></span> reading the tape…';
+  fetch(API + '/api/ai/explain-indicator/' + encodeURIComponent(symbol)).then(r => r.json()).then(data => {
+    if (data.error) { box.innerHTML = '<span style="color:var(--muted)">' + data.error + '</span>'; return; }
+    box.innerHTML = formatChat(data.explanation || '');
+    box.dataset.loaded = '1';
+  }).catch(e => box.innerHTML = '<span style="color:var(--red)">Error: ' + e + '</span>');
+}
+
+function loadSectors() {
+  const el = document.getElementById('sectorContent');
+  fetch(API + '/api/sectors').then(r => r.json()).then(data => {
+    const sectors = data.sectors || [];
+    if (!sectors.length) { el.innerHTML = '<div style="color:var(--muted)">No sector data available.</div>'; return; }
+    const lead = data.leadership || 'mixed';
+    const leadTxt = lead === 'cyclical'
+      ? '🟢 <strong style="color:var(--green)">Offense leading</strong> — cyclicals over defensives (' + data.cyclical_avg + '% vs ' + data.defensive_avg + '%). Risk-on rotation.'
+      : lead === 'defensive'
+      ? '🔴 <strong style="color:var(--red)">Defense leading</strong> — staples/utilities/health over cyclicals (' + data.defensive_avg + '% vs ' + data.cyclical_avg + '%). Risk-off rotation.'
+      : '🟠 <strong style="color:var(--amber)">Mixed leadership</strong> — no clear offense/defense tilt.';
+    document.getElementById('sectorLeadership').innerHTML = leadTxt;
+    const maxAbs = Math.max(0.5, ...sectors.map(s => Math.abs(s.change_pct || 0)));
+    el.innerHTML = sectors.map(s => {
+      const pct = s.change_pct || 0;
+      const w = Math.min(100, (Math.abs(pct) / maxAbs) * 100);
+      const col = pct >= 0 ? 'var(--green)' : 'var(--red)';
+      const chgCls = pct >= 0 ? 'up' : 'down';
+      const vr = s.vol_ratio;
+      const vrTxt = vr ? vr.toFixed(2) + '×' : '—';
+      const vrCol = vr && vr >= 1.3 ? 'var(--cyan)' : vr && vr < 0.8 ? 'var(--muted)' : 'var(--muted2)';
+      const tag = s.risk === 'defensive' ? '<span class="tag-def">DEF</span>' : '<span class="tag-cyc">CYC</span>';
+      return '<div class="sector-row">' +
+        '<div>' + s.name + tag + '</div>' +
+        '<div class="sector-bar-wrap"><div class="sector-bar" style="width:' + w + '%;background:' + col + '"></div></div>' +
+        '<div class="' + chgCls + '" style="text-align:right;font-weight:600">' + (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%</div>' +
+        '<div style="text-align:right;color:' + vrCol + '" title="Today volume vs 20-day avg — >1.3× = conviction">' + vrTxt + ' vol</div>' +
+      '</div>';
+    }).join('');
+  }).catch(e => el.innerHTML = '<div style="color:var(--red)">Error: ' + e + '</div>');
+}
+
+function loadMacroBrief() {
+  const el = document.getElementById('macroBrief');
+  el.innerHTML = '<div class="loading"><span class="spinner"></span><br>Reading the cross-asset tape...</div>';
+  fetch(API + '/api/ai/macro-brief').then(r => r.json()).then(data => {
+    if (data.error) { el.innerHTML = '<span style="color:var(--muted)">' + data.error + ' — add ANTHROPIC_API_KEY to enable the AI brief.</span>'; return; }
+    el.innerHTML = '<div style="font-size:10px;color:var(--muted);margin-bottom:10px">' + (data.timestamp ? new Date(data.timestamp).toLocaleString() : '') + '</div>' +
+      formatChat(data.brief || '');
+  }).catch(e => el.innerHTML = '<span style="color:var(--red)">Error: ' + e + '</span>');
 }
 
 function runMarketBrief() {

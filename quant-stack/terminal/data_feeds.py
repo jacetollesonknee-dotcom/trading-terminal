@@ -630,3 +630,314 @@ def full_research(symbol: str) -> dict:
         except Exception as e:  # noqa: BLE001
             results[key] = {"error": str(e)}
     return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  MACRO RADAR — global cross-asset indicators that signal market direction
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Each indicator carries a static "read" describing how it is normally
+# interpreted, plus a `bias` function that turns the live quote into a
+# risk-on / risk-off / neutral tilt. This is what powers the dashboard's
+# per-indicator explanations and the morning macro sentiment brief.
+
+def _pct(q: dict) -> float:
+    return q.get("change_pct") or 0.0
+
+
+def _price(q: dict) -> float:
+    return q.get("price") or 0.0
+
+
+# Group → list of indicator specs.
+# invert=True means "a rising value is risk-OFF" (e.g. VIX, gold, bonds price).
+MACRO_GROUPS: dict = {
+    "Volatility & Fear": [
+        {"symbol": "^VIX", "name": "VIX", "unit": "",
+         "read": "The market's 30-day fear gauge (implied vol on S&P 500 options). "
+                 "Under ~15 = complacent/risk-on; 20-30 = nervous; above 30 = fear/de-risking. "
+                 "Spikes usually coincide with equity sell-offs.",
+         "invert": True, "hot": lambda q: _price(q) >= 25},
+        {"symbol": "^VVIX", "name": "VVIX (vol-of-vol)", "unit": "",
+         "read": "Volatility OF the VIX — how frantically traders are bidding for VIX options. "
+                 "Rising VVIX with a calm VIX warns that a volatility spike is being hedged for. "
+                 "Above ~110 signals stress building under the surface.",
+         "invert": True, "hot": lambda q: _price(q) >= 110},
+        {"symbol": "^VXN", "name": "VXN (Nasdaq vol)", "unit": "",
+         "read": "Implied volatility on the Nasdaq-100. Tech-heavy fear gauge; leads the VIX "
+                 "when growth/mega-cap names are under pressure.",
+         "invert": True, "hot": lambda q: _price(q) >= 28},
+    ],
+    "Rates & Bonds": [
+        {"symbol": "^TNX", "name": "US 10Y Treasury Yield", "unit": "%",
+         "read": "The world's benchmark discount rate. Rising yields pressure long-duration/growth "
+                 "stocks and gold; falling yields ease financial conditions. Watch the SPEED of the "
+                 "move more than the level — fast spikes break risk assets.",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 3},
+        {"symbol": "^TYX", "name": "US 30Y Treasury Yield", "unit": "%",
+         "read": "The long bond. Reflects long-run growth + inflation + term-premium expectations. "
+                 "A steepening 30Y vs 10Y often flags inflation or fiscal worry.",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 3},
+        {"symbol": "^FVX", "name": "US 5Y Treasury Yield", "unit": "%",
+         "read": "The belly of the curve — most sensitive to the Fed's expected policy path. "
+                 "Leads repricing of rate-cut/hike odds.",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 3},
+        {"symbol": "^IRX", "name": "13-Week T-Bill Yield", "unit": "%",
+         "read": "The front end ≈ where the market thinks the Fed funds rate is going near-term. "
+                 "Anchors cash yields; inversion vs the 10Y (front > long) is a recession flag.",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 4},
+        {"symbol": "TLT", "name": "20Y+ Treasury ETF", "unit": "$",
+         "read": "Price proxy for long bonds (moves OPPOSITE to yields). Rising TLT = flight to "
+                 "safety / lower rates = usually risk-off for the economy but a tailwind for duration.",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 1.5},
+        {"symbol": "HYG", "name": "High-Yield Credit ETF", "unit": "$",
+         "read": "Junk-bond ETF — the canary for credit stress. When HYG rolls over while stocks "
+                 "hold up, it warns that the credit market sees trouble equities haven't priced yet.",
+         "invert": False, "hot": lambda q: _pct(q) <= -1},
+    ],
+    "FX & Dollar": [
+        {"symbol": "DX-Y.NYB", "name": "US Dollar Index (DXY)", "unit": "",
+         "read": "The dollar vs a basket of majors. A strong dollar tightens global financial "
+                 "conditions, pressures commodities, EM, and US multinationals' earnings. "
+                 "Falling DXY is broadly risk-on.",
+         "invert": True, "hot": lambda q: abs(_pct(q)) >= 0.6},
+        {"symbol": "JPY=X", "name": "USD/JPY (Yen)", "unit": "",
+         "read": "The world's carry-trade funding pair. A fast rise (weak yen) can fuel risk appetite, "
+                 "but a sudden DROP (yen strengthening) often means a carry-trade unwind — a classic "
+                 "trigger for global de-risking (see Aug 2024).",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 0.8},
+        {"symbol": "EURUSD=X", "name": "EUR/USD", "unit": "",
+         "read": "The anti-dollar. Rising EUR/USD usually confirms a weakening dollar and easier "
+                 "global liquidity (risk-on).",
+         "invert": False, "hot": lambda q: abs(_pct(q)) >= 0.6},
+        {"symbol": "KRW=X", "name": "USD/KRW (Won)", "unit": "",
+         "read": "The Korean won is a high-beta EM/Asia risk barometer given Korea's export & "
+                 "semiconductor exposure. A weakening won (rising USD/KRW) signals Asia risk-off.",
+         "invert": True, "hot": lambda q: abs(_pct(q)) >= 0.7},
+    ],
+    "Commodities": [
+        {"symbol": "GC=F", "name": "Gold", "unit": "$",
+         "read": "The premier safe-haven & real-rates / debasement hedge. Rising gold WITH rising "
+                 "yields is unusual and flags fear or de-dollarization; rising gold with falling "
+                 "yields is the classic risk-off flight to safety.",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 1.5},
+        {"symbol": "CL=F", "name": "WTI Crude Oil", "unit": "$",
+         "read": "US benchmark oil. A demand & growth proxy — but sharp spikes are an inflation/"
+                 "stagflation risk that squeezes consumers and can force central banks tighter.",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 3},
+        {"symbol": "BZ=F", "name": "Brent Crude Oil", "unit": "$",
+         "read": "The global oil benchmark. Brent minus WTI (the spread) reflects geopolitical & "
+                 "shipping risk; a widening spread often means a supply scare abroad.",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 3},
+        {"symbol": "HG=F", "name": "Copper (Dr. Copper)", "unit": "$",
+         "read": "'Dr. Copper' — used everywhere in industry, so it reads the pulse of global growth. "
+                 "Rising copper = expansion/reflation; falling copper warns of a slowdown.",
+         "invert": False, "hot": lambda q: abs(_pct(q)) >= 2},
+        {"symbol": "SI=F", "name": "Silver", "unit": "$",
+         "read": "Half precious-metal haven, half industrial. Outperforming gold in a rally signals "
+                 "reflation/risk appetite; lagging gold signals defensive haven demand.",
+         "invert": None, "hot": lambda q: abs(_pct(q)) >= 2},
+    ],
+    "Global Equity": [
+        {"symbol": "^GSPC", "name": "S&P 500", "unit": "",
+         "read": "The US large-cap benchmark — the market everyone else is measured against.",
+         "invert": False, "hot": lambda q: abs(_pct(q)) >= 1},
+        {"symbol": "^IXIC", "name": "Nasdaq Composite", "unit": "",
+         "read": "Growth / tech / long-duration equity. Leads on the way up AND down; "
+                 "underperformance vs the S&P signals a defensive rotation out of risk.",
+         "invert": False, "hot": lambda q: abs(_pct(q)) >= 1.2},
+        {"symbol": "^RUT", "name": "Russell 2000 (small caps)", "unit": "",
+         "read": "Domestic small caps — most sensitive to the US economy, credit, and rates. "
+                 "Small-cap leadership = healthy risk-on breadth; lagging = narrow, fragile rally.",
+         "invert": False, "hot": lambda q: abs(_pct(q)) >= 1.2},
+        {"symbol": "^N225", "name": "Nikkei 225 (Japan)", "unit": "",
+         "read": "Japan's benchmark — tightly linked to USD/JPY. Because Tokyo trades before the US, "
+                 "it's an overnight tell for global risk sentiment.",
+         "invert": False, "hot": lambda q: abs(_pct(q)) >= 1.5},
+        {"symbol": "^KS11", "name": "KOSPI (South Korea)", "unit": "",
+         "read": "Korea's index is heavy in semiconductors & exports — a leading indicator for the "
+                 "global tech cycle and Asian trade. Weakness here often precedes tech weakness in the US.",
+         "invert": False, "hot": lambda q: abs(_pct(q)) >= 1.5},
+        {"symbol": "^HSI", "name": "Hang Seng (Hong Kong)", "unit": "",
+         "read": "The main window into China risk sentiment and global EM appetite.",
+         "invert": False, "hot": lambda q: abs(_pct(q)) >= 1.5},
+    ],
+}
+
+# Flatten for quick symbol → spec lookup (used by explain-indicator).
+MACRO_SPECS: dict = {
+    spec["symbol"]: {**spec, "group": group}
+    for group, specs in MACRO_GROUPS.items()
+    for spec in specs
+}
+
+
+def _indicator_bias(spec: dict, q: dict) -> str:
+    """Turn a live quote into a coarse risk tilt for the dashboard."""
+    pct = _pct(q)
+    if abs(pct) < 0.15:
+        return "neutral"
+    invert = spec.get("invert")
+    if invert is None:
+        return "neutral"          # direction is context-dependent (rates, gold, yen)
+    up_is_risk_on = not invert
+    rising = pct > 0
+    if rising == up_is_risk_on:
+        return "risk-on"
+    return "risk-off"
+
+
+def macro_dashboard() -> dict:
+    """Fetch every macro-radar indicator in parallel, grouped, with metadata."""
+    cached = _cache.get("macro", ttl=30)
+    if cached is not None:
+        return cached
+
+    all_symbols = list(MACRO_SPECS.keys())
+    futures = {_executor.submit(yahoo_quote, s): s for s in all_symbols}
+    quotes: dict = {}
+    for fut in as_completed(futures, timeout=18):
+        sym = futures[fut]
+        try:
+            q = fut.result()
+            if isinstance(q, dict) and "error" not in q:
+                quotes[sym] = q
+        except Exception:  # noqa: BLE001
+            continue
+
+    groups_out: list = []
+    tally = {"risk-on": 0, "risk-off": 0, "neutral": 0}
+    for group, specs in MACRO_GROUPS.items():
+        items = []
+        for spec in specs:
+            q = quotes.get(spec["symbol"])
+            if not q:
+                continue
+            bias = _indicator_bias(spec, q)
+            tally[bias] = tally.get(bias, 0) + 1
+            hot = False
+            try:
+                hot = bool(spec.get("hot") and spec["hot"](q))
+            except Exception:  # noqa: BLE001
+                hot = False
+            items.append({
+                "symbol": spec["symbol"],
+                "name": spec["name"],
+                "unit": spec.get("unit", ""),
+                "price": q.get("price"),
+                "change": q.get("change"),
+                "change_pct": q.get("change_pct"),
+                "read": spec["read"],
+                "bias": bias,
+                "hot": hot,
+            })
+        if items:
+            groups_out.append({"group": group, "indicators": items})
+
+    scored = tally["risk-on"] + tally["risk-off"]
+    if scored == 0:
+        tilt, tilt_score = "neutral", 0.0
+    else:
+        tilt_score = round((tally["risk-on"] - tally["risk-off"]) / scored, 2)
+        if tilt_score >= 0.25:
+            tilt = "risk-on"
+        elif tilt_score <= -0.25:
+            tilt = "risk-off"
+        else:
+            tilt = "mixed"
+
+    out = {
+        "groups": groups_out,
+        "tilt": tilt,
+        "tilt_score": tilt_score,
+        "tally": tally,
+        "as_of": datetime.now().isoformat(),
+    }
+    _cache.set("macro", out)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  SECTOR ROTATION — which sectors money is flowing into (by move + volume)
+# ═══════════════════════════════════════════════════════════════════════
+
+SECTOR_ETFS: list = [
+    {"symbol": "XLK", "name": "Technology", "risk": "cyclical"},
+    {"symbol": "XLC", "name": "Communication Svcs", "risk": "cyclical"},
+    {"symbol": "XLY", "name": "Consumer Discretionary", "risk": "cyclical"},
+    {"symbol": "XLF", "name": "Financials", "risk": "cyclical"},
+    {"symbol": "XLI", "name": "Industrials", "risk": "cyclical"},
+    {"symbol": "XLB", "name": "Materials", "risk": "cyclical"},
+    {"symbol": "XLE", "name": "Energy", "risk": "cyclical"},
+    {"symbol": "XLV", "name": "Health Care", "risk": "defensive"},
+    {"symbol": "XLP", "name": "Consumer Staples", "risk": "defensive"},
+    {"symbol": "XLU", "name": "Utilities", "risk": "defensive"},
+    {"symbol": "XLRE", "name": "Real Estate", "risk": "defensive"},
+]
+
+
+def sector_rotation() -> dict:
+    """Rank the 11 SPDR sectors by performance, with volume vs its own average.
+
+    Volume ratio (today's volume / recent average) shows CONVICTION — a sector
+    up on heavy volume is real rotation IN; up on light volume is a drift.
+    """
+    cached = _cache.get("sectors", ttl=60)
+    if cached is not None:
+        return cached
+
+    def _one(spec: dict) -> dict | None:
+        q = yahoo_quote(spec["symbol"])
+        if not isinstance(q, dict) or "error" in q:
+            return None
+        hist = yahoo_history(spec["symbol"], period="1mo", interval="1d")
+        vols = [h.get("volume", 0) for h in (hist or []) if isinstance(h, dict) and h.get("volume")]
+        avg_vol = sum(vols[-20:]) / len(vols[-20:]) if vols else 0
+        today_vol = q.get("volume", 0) or 0
+        vol_ratio = round(today_vol / avg_vol, 2) if avg_vol else None
+        return {
+            "symbol": spec["symbol"],
+            "name": spec["name"],
+            "risk": spec["risk"],
+            "price": q.get("price"),
+            "change_pct": q.get("change_pct") or 0,
+            "volume": today_vol,
+            "avg_volume": int(avg_vol),
+            "vol_ratio": vol_ratio,
+        }
+
+    futures = {_executor.submit(_one, spec): spec["symbol"] for spec in SECTOR_ETFS}
+    sectors: list = []
+    for fut in as_completed(futures, timeout=20):
+        try:
+            r = fut.result()
+            if r:
+                sectors.append(r)
+        except Exception:  # noqa: BLE001
+            continue
+
+    sectors.sort(key=lambda s: s.get("change_pct", 0), reverse=True)
+
+    def _avg(items):
+        vals = [s["change_pct"] for s in items]
+        return round(sum(vals) / len(vals), 2) if vals else 0
+
+    cyc = [s for s in sectors if s["risk"] == "cyclical"]
+    dfn = [s for s in sectors if s["risk"] == "defensive"]
+    breadth = _avg(cyc) - _avg(dfn)
+    if breadth >= 0.3:
+        leadership = "cyclical"   # offense leading = risk-on rotation
+    elif breadth <= -0.3:
+        leadership = "defensive"  # defense leading = risk-off rotation
+    else:
+        leadership = "mixed"
+
+    out = {
+        "sectors": sectors,
+        "leadership": leadership,
+        "cyclical_avg": _avg(cyc),
+        "defensive_avg": _avg(dfn),
+        "as_of": datetime.now().isoformat(),
+    }
+    _cache.set("sectors", out)
+    return out

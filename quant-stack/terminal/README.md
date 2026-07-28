@@ -7,6 +7,15 @@
 ## What it currently does (today, standalone)
 
 - Live Yahoo Finance / Zacks / OpenInsider / Kalshi quotes and chains
+- **Macro Radar** — a cross-asset dashboard of the indicators that signal market
+  direction: VIX / VVIX / VXN volatility, the US Treasury curve (13w / 5Y / 10Y /
+  30Y + TLT + HYG credit), the dollar and FX (DXY, USD/JPY, EUR/USD, USD/KRW),
+  commodities (gold, WTI + Brent crude, copper, silver), and the overnight global
+  session (S&P, Nasdaq, Russell, Nikkei, KOSPI, Hang Seng). Each tile carries a
+  plain-English "what this means for the market" read, an on-demand AI explanation,
+  a risk-on/off bias, a computed overall market tilt, an AI morning-sentiment brief,
+  and a sector-rotation panel ranked by performance **and** volume conviction
+  (today's volume vs its 20-day average).
 - 9-source news aggregator (CNBC, MarketWatch, WSJ, Benzinga, Seeking Alpha,
   Reuters, Investing.com, Yahoo Finance, plus CNN Fear & Greed)
 - Streaming chat against `claude-opus-4-7` (extended thinking + prompt caching)
