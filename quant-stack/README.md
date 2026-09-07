@@ -221,6 +221,52 @@ its stop above entry (or a short with it below) is rejected as a fat-finger.
 Quantity is floored to `lot_step` — never rounded up past the budget — and
 zeroed below `min_notional` rather than returned as an untradeable number.
 
+### Regime attribution (`backtest/regimes.py`)
+
+Where did the Sharpe come from?
+
+```python
+from backtest import RegimeConfig, regime_report
+
+rep = regime_report(result, prices, RegimeConfig(ma_bars=200, chop_band=0.02))
+rep.table                 # per-regime Sharpe, return, hit rate, time share, P&L share
+rep.single_regime_edge    # True if only one regime carries a positive Sharpe
+rep.verdict()             # "Edge exists ONLY in bull (41% of time, 112% of P&L)..."
+```
+
+Labels are trailing (no look-ahead). Drawdown is deliberately not reported
+per regime — the bars aren't contiguous.
+
+### Health monitor (`backtest/monitor.py`)
+
+Run on a schedule. It **recommends**; it never acts.
+
+```python
+from backtest import Benchmark, HealthConfig, health_check
+
+bench = Benchmark.from_result(walk_forward_result.result)   # OOS, not in-sample
+rep = health_check(live_net_returns, bench, HealthConfig(window=30, consecutive_required=3))
+rep.alerts            # SHARPE_DECAY / DRAWDOWN_EXCEEDED / UNDERWATER_TOO_LONG / NO_ACTIVITY
+rep.recommendation    # insufficient_data | continue | review | halt_recommended
+rep.live_sharpe_se    # read the live Sharpe with this beside it
+```
+
+A 30-bar annualized Sharpe has a standard error of ~3.5; a "halt below half
+the backtest Sharpe" rule fires on ~40% of days for a strategy whose true
+Sharpe is 1.5. The monitor instead asks how likely the window is *given* the
+benchmark Sharpe (PSR), requires the breach to persist, and treats a window
+with no trades as a different alert from one that's losing.
+
+### DSR hurdle (`minimum_sharpe_to_pass`)
+
+Before running anything: how good must the best of N look to be
+distinguishable from noise?
+
+```python
+from backtest import minimum_sharpe_to_pass
+minimum_sharpe_to_pass(n_obs=4380, n_trials=50)   # per-period Sharpe floor
+```
+
 ## ADRs (architecture decisions)
 
 | # | Title | Status |

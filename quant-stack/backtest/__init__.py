@@ -21,10 +21,26 @@ from backtest.deflated_sharpe import (
     deannualize_sharpe,
     deflated_sharpe,
     expected_max_sharpe,
+    minimum_sharpe_to_pass,
     probabilistic_sharpe,
 )
 from backtest.engine import run_backtest, validate_prices
 from backtest.metrics import PerformanceMetrics, compute_metrics
+from backtest.monitor import (
+    Benchmark,
+    HealthConfig,
+    HealthReport,
+    health_check,
+    longest_underwater,
+)
+from backtest.regimes import (
+    Regime,
+    RegimeConfig,
+    RegimeReport,
+    RegimeStats,
+    classify_regimes,
+    regime_report,
+)
 from backtest.result import BacktestResult
 from backtest.sizing import PositionSize, Side, SizingConfig, position_size
 from backtest.walk_forward import (
@@ -39,22 +55,34 @@ from backtest.walk_forward import (
 __all__ = [
     "BacktestConfig",
     "BacktestResult",
+    "Benchmark",
     "DeflatedSharpeResult",
     "FitFn",
     "FittedStrategy",
     "Fold",
+    "HealthConfig",
+    "HealthReport",
     "PerformanceMetrics",
     "PositionSize",
+    "Regime",
+    "RegimeConfig",
+    "RegimeReport",
+    "RegimeStats",
     "Side",
     "SizingConfig",
     "WalkForwardConfig",
     "WalkForwardResult",
+    "classify_regimes",
     "compute_metrics",
     "deannualize_sharpe",
     "deflated_sharpe",
     "expected_max_sharpe",
+    "health_check",
+    "longest_underwater",
+    "minimum_sharpe_to_pass",
     "position_size",
     "probabilistic_sharpe",
+    "regime_report",
     "run_backtest",
     "validate_prices",
     "walk_forward",

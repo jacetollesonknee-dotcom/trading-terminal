@@ -123,6 +123,45 @@ def probabilistic_sharpe(
     return float(norm.cdf(z))
 
 
+def minimum_sharpe_to_pass(
+    n_obs: int,
+    n_trials: int,
+    trial_sharpe_std: float | None = None,
+    threshold: float = _DEFAULT_THRESHOLD,
+) -> float:
+    """The per-period Sharpe a best-of-N result must show to clear the DSR threshold.
+
+    Answers "how good does my best variant have to look before it is
+    distinguishable from noise?" *before* running anything. Assumes normal
+    returns (skew 0, kurtosis 3), so it is a floor — fat tails raise it.
+
+    Args:
+        n_obs: Periods the selected strategy will be evaluated over.
+        n_trials: Variations that will be tried.
+        trial_sharpe_std: Dispersion of the trial Sharpes. Defaults to
+            ``1/sqrt(n_obs)`` — the sampling noise of a per-period Sharpe,
+            i.e. what N pure-noise trials would show.
+        threshold: DSR confidence to clear.
+    """
+    if n_obs < 2:  # noqa: PLR2004  — same bound as probabilistic_sharpe
+        msg = f"n_obs must be >= 2, got {n_obs}"
+        raise ValueError(msg)
+    if not 0.0 < threshold < 1.0:
+        msg = f"threshold must be in (0, 1), got {threshold}"
+        raise ValueError(msg)
+    std = trial_sharpe_std if trial_sharpe_std is not None else 1.0 / math.sqrt(n_obs)
+    sr_star = expected_max_sharpe(n_trials, std)
+    # PSR is monotone increasing in the Sharpe; bisect for the crossing.
+    lo, hi = sr_star, sr_star + 10.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if probabilistic_sharpe(mid, n_obs, benchmark=sr_star) >= threshold:
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
 @dataclass(frozen=True)
 class DeflatedSharpeResult:
     """Outcome of a deflated-Sharpe test. All Sharpes are per-period."""
