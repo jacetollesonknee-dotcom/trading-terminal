@@ -200,6 +200,27 @@ cold-started every fold (the engine's `execution_lag` guards the future, not
 the slice), and out-of-sample signals are stitched into a single backtest so
 positions carry across fold boundaries instead of restarting flat each fold.
 
+### Position sizing (`backtest/sizing.py`)
+
+Fixed-fractional sizing with an honest stop:
+
+```python
+from backtest import Side, SizingConfig, position_size
+
+ps = position_size(capital=10_000, entry=100, stop=95, side=Side.long,
+                   cfg=SizingConfig(risk_fraction=0.01, max_position_fraction=0.20,
+                                    stop_slippage_bps=3, fee_bps=5, lot_step=0.001))
+ps.position_fraction   # signed notional/capital — drop it straight into a signal
+ps.loss_if_stopped     # includes slippage on the stop fill and fees on both legs
+ps.capped, ps.floored, ps.below_min_notional   # each one means realized risk < target
+```
+
+The loss budget includes the stop filling worse than the stop price and fees
+on both legs, so `risk_fraction` is what you'd *actually* lose. A long with
+its stop above entry (or a short with it below) is rejected as a fat-finger.
+Quantity is floored to `lot_step` — never rounded up past the budget — and
+zeroed below `min_notional` rather than returned as an untradeable number.
+
 ## ADRs (architecture decisions)
 
 | # | Title | Status |

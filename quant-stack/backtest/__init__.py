@@ -26,6 +26,7 @@ from backtest.deflated_sharpe import (
 from backtest.engine import run_backtest, validate_prices
 from backtest.metrics import PerformanceMetrics, compute_metrics
 from backtest.result import BacktestResult
+from backtest.sizing import PositionSize, Side, SizingConfig, position_size
 from backtest.walk_forward import (
     FitFn,
     FittedStrategy,
@@ -43,12 +44,16 @@ __all__ = [
     "FittedStrategy",
     "Fold",
     "PerformanceMetrics",
+    "PositionSize",
+    "Side",
+    "SizingConfig",
     "WalkForwardConfig",
     "WalkForwardResult",
     "compute_metrics",
     "deannualize_sharpe",
     "deflated_sharpe",
     "expected_max_sharpe",
+    "position_size",
     "probabilistic_sharpe",
     "run_backtest",
     "validate_prices",
