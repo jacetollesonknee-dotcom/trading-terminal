@@ -11,6 +11,9 @@ Per-source default cadences (operator can override):
     openinsider         5 min (SEC filings don't move minute-by-minute)
     zacks               1 hour (Zacks updates pre-market)
     x_posts             5 min (rsshub caches anyway; more is rude)
+    chains              once per day, at/after a target UTC time (default
+                        20:30 UTC, just after the US close). The store keeps
+                        one snapshot per day, so more often would only dedup.
 
 "Real time" with free sources means polled, not pushed. None of the
 upstream APIs expose SSE/websocket on their free tier. The scheduler
@@ -33,27 +36,35 @@ Design constraints:
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from storage.store import ParquetStore, WriteResult
+
+if TYPE_CHECKING:
+    from config.settings import Settings
 
 # Default cadences in seconds.
 _DEFAULT_YAHOO_INTERVAL_S: Final[int] = 30
 _DEFAULT_OPENINSIDER_INTERVAL_S: Final[int] = 300
 _DEFAULT_ZACKS_INTERVAL_S: Final[int] = 3600
 _DEFAULT_X_INTERVAL_S: Final[int] = 300
+# Chains: how often to CHECK whether today's capture is due, not how often
+# to capture. The capture itself happens once per day.
+_DEFAULT_CHAINS_INTERVAL_S: Final[int] = 300
+_DEFAULT_CHAINS_AFTER_UTC: Final[dt.time] = dt.time(20, 30)
 
 
 @dataclass(frozen=True, slots=True)
 class SchedulerEvent:
     """A successful or failed poll cycle for one source."""
 
-    source: str                  # "yahoo" | "openinsider" | "zacks" | "x"
+    source: str                  # "yahoo" | "openinsider" | "zacks" | "x" | "chains"
     triggered_at: datetime       # when the poll fired (UTC)
     ok: bool
     write_result: WriteResult | None
@@ -74,14 +85,23 @@ class SchedulerConfig:
     openinsider_enabled: bool = True
     zacks_enabled: bool = True
     x_enabled: bool = False  # default off — rsshub.app is unreliable
+    chains_enabled: bool = False  # default off — needs an enabled broker
 
     yahoo_interval_s: int = _DEFAULT_YAHOO_INTERVAL_S
     openinsider_interval_s: int = _DEFAULT_OPENINSIDER_INTERVAL_S
     zacks_interval_s: int = _DEFAULT_ZACKS_INTERVAL_S
     x_interval_s: int = _DEFAULT_X_INTERVAL_S
+    chains_interval_s: int = _DEFAULT_CHAINS_INTERVAL_S
+
+    # Chains are captured once per day, the first check at/after this UTC time.
+    chains_capture_after_utc: dt.time = _DEFAULT_CHAINS_AFTER_UTC
+    chains_broker: str = "schwab"
 
     watchlist: tuple[str, ...] = field(default_factory=tuple)
     x_handles: tuple[str, ...] = field(default_factory=tuple)
+    # Underlyings whose option chains get captured. Separate from the equity
+    # watchlist: you may quote 30 names and only want chains for 2.
+    chain_watchlist: tuple[str, ...] = field(default_factory=tuple)
 
 
 class IngestionScheduler:
@@ -113,18 +133,24 @@ class IngestionScheduler:
         on_event: Callable[[SchedulerEvent], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        settings: Settings | None = None,
     ) -> None:
         self._store = store
         self._config = config or SchedulerConfig()
         self._on_event = on_event or (lambda _e: None)
         self._clock = clock
         self._sleep = sleep
+        # Only the chains source needs settings (for the broker gate); loaded
+        # lazily at first use if not injected, so existing callers are unchanged.
+        self._settings = settings
 
         self._threads: list[threading.Thread] = []
         self._stop_event = threading.Event()
         self._watchlist_lock = threading.Lock()
         self._watchlist: tuple[str, ...] = self._config.watchlist
         self._x_handles: tuple[str, ...] = self._config.x_handles
+        self._chain_watchlist: tuple[str, ...] = self._config.chain_watchlist
+        self._chains_last_capture_date: dt.date | None = None
 
     # ── safe emit (callback hygiene) ──────────────────────────────────────
 
@@ -172,6 +198,10 @@ class IngestionScheduler:
             self._threads.append(self._spawn(
                 "x", self._tick_x, self._config.x_interval_s,
             ))
+        if self._config.chains_enabled:
+            self._threads.append(self._spawn(
+                "chains", self._tick_chains, self._config.chains_interval_s,
+            ))
 
     def stop(self, *, timeout: float = 5.0) -> None:
         """Signal threads to exit; wait up to ``timeout`` seconds each."""
@@ -196,6 +226,11 @@ class IngestionScheduler:
         with self._watchlist_lock:
             self._x_handles = tuple(h.lstrip("@") for h in handles)
 
+    def set_chain_watchlist(self, symbols: tuple[str, ...]) -> None:
+        """Replace the chain-capture underlyings atomically. Thread-safe."""
+        with self._watchlist_lock:
+            self._chain_watchlist = tuple(s.upper() for s in symbols)
+
     def watchlist(self) -> tuple[str, ...]:
         with self._watchlist_lock:
             return self._watchlist
@@ -203,6 +238,15 @@ class IngestionScheduler:
     def x_handles(self) -> tuple[str, ...]:
         with self._watchlist_lock:
             return self._x_handles
+
+    def chain_watchlist(self) -> tuple[str, ...]:
+        with self._watchlist_lock:
+            return self._chain_watchlist
+
+    @property
+    def chains_last_capture_date(self) -> dt.date | None:
+        """The last calendar day (UTC) a chain capture succeeded, or None."""
+        return self._chains_last_capture_date
 
     # ── thread loop ───────────────────────────────────────────────────────
 
@@ -325,6 +369,52 @@ class IngestionScheduler:
                         source="x", triggered_at=started, ok=False,
                         write_result=None, error_message=str(e), detail=handle,
                     ))
+
+    def _tick_chains(self) -> None:
+        """Capture option chains once per UTC day, at/after the target time.
+
+        Retry policy: if every underlying fails (an outage), the day is left
+        unmarked so the next check retries. A disabled broker marks the day
+        done after one failure event — retrying every five minutes until the
+        operator flips a flag would just be noise.
+        """
+        from ingestion.brokers.registry import BrokerDisabledError
+        from ingestion.chain_capture import run_capture
+
+        underlyings = self.chain_watchlist()
+        if not underlyings:
+            return
+        now = _utcnow()
+        if now.time() < self._config.chains_capture_after_utc:
+            return
+        if self._chains_last_capture_date == now.date():
+            return
+
+        if self._settings is None:
+            from config.settings import get_settings
+
+            self._settings = get_settings()
+
+        try:
+            results = run_capture(
+                self._settings, self._store, underlyings,
+                broker_name=self._config.chains_broker,
+            )
+        except BrokerDisabledError as e:
+            self._emit(SchedulerEvent(
+                source="chains", triggered_at=now, ok=False,
+                write_result=None, error_message=str(e), detail=",".join(underlyings),
+            ))
+            self._chains_last_capture_date = now.date()
+            return
+
+        for r in results:
+            self._emit(SchedulerEvent(
+                source="chains", triggered_at=r.started_at, ok=r.ok,
+                write_result=r.write_result, error_message=r.error, detail=r.underlying,
+            ))
+        if any(r.ok for r in results):
+            self._chains_last_capture_date = now.date()
 
 
 def _utcnow() -> datetime:
