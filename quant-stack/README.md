@@ -100,6 +100,7 @@ quant-stack/
 ├── README.md
 ├── .pre-commit-config.yaml
 ├── .github/workflows/ci.yml
+├── backtest/                # vectorized crypto backtester (see below)
 ├── config/                  # settings + OS keychain wrappers
 ├── ingestion/               # Schwab client + ingested-record schemas
 ├── memory/                  # structured YAML (schemas in _schemas/) + episodic SQLite
@@ -117,8 +118,42 @@ quant-stack/
     └── unit/
 ```
 
-Future directories (added in their phases): `models/`, `signals/`, `backtest/`,
+Future directories (added in their phases): `models/`, `signals/`,
 `risk/`, `execution/`, `reporting/`, `monitoring/`, `mcp_server/`.
+
+## Vectorized crypto backtester (`backtest/`)
+
+A fast, look-ahead-safe backtester for target-position signals on a single
+crypto instrument. Feed it close prices and a per-bar target position; it
+returns an equity curve, a cost-aware P&L ledger, and performance metrics.
+
+```python
+import pandas as pd
+from backtest import BacktestConfig, run_backtest
+
+# prices: pd.Series of closes, ascending UTC DatetimeIndex, strictly positive.
+# signal: target position in [-1, 1], SAME index, computed from data available
+#         AT that timestamp.
+result = run_backtest(prices, signal, BacktestConfig())
+result.metrics.sharpe          # annualized (365 periods/yr for daily crypto)
+result.metrics.max_drawdown
+result.equity_curve            # pd.Series
+```
+
+Design notes:
+
+- **No look-ahead.** The signal at bar *t* is acted on at *t + execution_lag*
+  (lag ≥ 1, enforced by the config). Principle #1 of the brief, verified by a
+  hypothesis property test in `tests/property/test_backtest_lookahead.py`.
+- **No silent fallbacks.** Misaligned indices, non-monotonic time, duplicate
+  timestamps, and non-positive prices are hard errors, not quiet repairs. A
+  `NaN` in the *signal* is the one tolerated gap — it means "flat".
+- **Costs.** Turnover (`|Δposition|`) is charged in bps of notional (fee +
+  slippage), plus an optional per-bar funding carry on the held position for
+  perpetual-swap strategies.
+- This is the **vectorized** backtester for fast crypto signal research. It is
+  distinct from the Phase 2 event-driven, options-aware backtester the brief
+  plans for US equity options.
 
 ## ADRs (architecture decisions)
 

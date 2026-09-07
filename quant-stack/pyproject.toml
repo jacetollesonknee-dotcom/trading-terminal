@@ -119,7 +119,7 @@ namespace_packages = true
 [[tool.mypy.overrides]]
 module = [
     "hmmlearn.*", "QuantLib.*", "arch.*", "statsmodels.*", "keyring.*",
-    "pyarrow.*", "duckdb.*", "filelock.*", "hypothesis.*",
+    "pyarrow.*", "duckdb.*", "filelock.*", "hypothesis.*", "pandas.*",
 ]
 ignore_missing_imports = true
 
@@ -142,4 +142,4 @@ skips = ["B101"]  # assert in non-test contexts handled case by case
 
 # ── Hatch build (so editable installs work) ───────────────────────────────
 [tool.hatch.build.targets.wheel]
-packages = ["config", "ingestion", "memory", "storage"]
+packages = ["backtest", "config", "ingestion", "memory", "storage"]
