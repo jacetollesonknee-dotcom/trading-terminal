@@ -136,7 +136,17 @@ Two engines, one ledger shape, one validation stack.
 Both emit the same ledger, so metrics, deflated Sharpe, regime attribution,
 and the health monitor apply to either.
 
-**Options quickstart** (synthetic chains until your Schwab capture fills the store):
+**Getting chain history into the store** — two sources, one store:
+
+```bash
+uv run python -m cli capture-chains QQQ SPY                   # today's chain, from Schwab (run daily)
+uv run python -m cli import-optionsdx ./optionsdx --underlying QQQ   # backfill years from OptionsDX CSVs
+```
+
+The importer prints the Phase 1 ticket's field-completeness report and says
+outright if open interest is absent (GEX then works only on captured chains).
+
+**Options quickstart** (synthetic chains until the store has history):
 
 ```bash
 cd quant-stack

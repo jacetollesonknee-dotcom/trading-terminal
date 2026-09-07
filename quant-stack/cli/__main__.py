@@ -1,15 +1,16 @@
 """Entry point: ``python -m cli <command> [...]``.
 
 Subcommands:
-    connect          Manage broker connections (Schwab, TOS).
-    capture-chains   Record today's option chain snapshot(s) to the store.
+    connect            Manage broker connections (Schwab, TOS).
+    capture-chains     Record today's option chain snapshot(s) to the store.
+    import-optionsdx   Backfill option-chain history from OptionsDX CSV files.
 """
 
 from __future__ import annotations
 
 import argparse
 
-from cli import capture, connect
+from cli import capture, connect, import_optionsdx
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,12 +21,15 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     connect.add_subparser(subparsers)
     capture.add_subparser(subparsers)
+    import_optionsdx.add_subparser(subparsers)
 
     args = parser.parse_args(argv)
     if args.command == "connect":
         return connect.dispatch(args)
     if args.command == "capture-chains":
         return capture.dispatch(args)
+    if args.command == "import-optionsdx":
+        return import_optionsdx.dispatch(args)
 
     parser.print_help()
     return 1
