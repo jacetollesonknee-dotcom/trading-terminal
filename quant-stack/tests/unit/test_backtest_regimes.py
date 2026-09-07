@@ -75,6 +75,25 @@ def test_single_regime_edge_is_detected() -> None:
     assert "ONLY in bull" in rep.verdict()
 
 
+def test_single_regime_edge_with_net_loss_reads_sensibly() -> None:
+    """Profitable in bull, but a bigger loss elsewhere: no '-136% of P&L'."""
+    # Flat, then jump+trend up (bull, profitable), then a crash below the MA
+    # (bear) that erases more than the bull gained. Long-only rides both.
+    up = list(105 * np.exp(np.linspace(0, 0.3, 60)))
+    down = list(up[-1] * np.exp(np.linspace(0, -0.8, 60)))
+    vals = [100.0] * 250 + up + down + [down[-1]] * 200
+    prices = pd.Series(vals, index=_idx(len(vals)))
+    signal = pd.Series(1.0, index=prices.index)
+    result = run_backtest(prices, signal, BacktestConfig(fee_bps=0, slippage_bps=0))
+    rep = regime_report(result, prices, RegimeConfig(ma_bars=200, chop_band=0.02))
+    assert result.metrics.total_return < 0
+    assert rep.single_regime_edge
+    v = rep.verdict()
+    assert "ONLY in bull" in v
+    assert "lost money overall" in v
+    assert "%" not in v.split("of time")[1]  # no negative-share nonsense after the time share
+
+
 def test_no_edge_verdict() -> None:
     prices = pd.Series(100.0, index=_idx(300))
     prices = prices * (1 + 0.001 * np.sin(np.arange(300)))  # tiny wiggle around MA

@@ -122,6 +122,15 @@ class RegimeReport:
             return "No regime shows a positive Sharpe. There is no edge to attribute."
         if len(edge) == 1:
             s = next(s for s in self.stats if s.regime is edge[0])
+            # pnl_share is a share of TOTAL P&L; when the total is negative the
+            # share of the one profitable regime is negative too, which reads
+            # as nonsense. Say what happened instead.
+            if math.isnan(s.pnl_share) or s.pnl_share < 0.0:
+                return (
+                    f"Edge exists ONLY in {s.regime.value} ({s.time_share:.0%} of time), "
+                    f"and the strategy still lost money overall. Outside that regime it "
+                    f"gave back more than it made."
+                )
             return (
                 f"Edge exists ONLY in {s.regime.value} ({s.time_share:.0%} of time, "
                 f"{s.pnl_share:.0%} of P&L). This is a bet on that regime persisting."

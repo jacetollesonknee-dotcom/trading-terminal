@@ -127,6 +127,19 @@ A fast, look-ahead-safe backtester for target-position signals on a single
 crypto instrument. Feed it close prices and a per-bar target position; it
 returns an equity curve, a cost-aware P&L ledger, and performance metrics.
 
+**Run the whole chain on real BTC-USD data in one command:**
+
+```bash
+cd quant-stack
+uv sync --all-extras                                   # once
+uv run python examples/crypto_quickstart.py            # pulls 5y of BTC-USD from Yahoo
+uv run python examples/crypto_quickstart.py --synthetic # no network
+```
+
+That script is the map: data → N variations + deflated Sharpe → walk-forward
+→ regime attribution → sizing → health check. Copy it and swap in your own
+`signal_fn` / `fit_fn`.
+
 ```python
 import pandas as pd
 from backtest import BacktestConfig, run_backtest

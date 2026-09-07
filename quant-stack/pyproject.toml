@@ -93,6 +93,8 @@ ignore = [
 "config/secrets.py" = ["T201"]
 # CLI modules are allowed to print and to use deferred imports inside the dispatch table.
 "cli/**" = ["T201", "PLC0415"]
+# Runnable examples print their output; magic numbers there are illustrative.
+"examples/**" = ["T201", "PLR2004"]
 # Registry uses lazy factories — late-bound imports inside functions are intentional
 # (decouples the registry module from the broker client modules).
 "ingestion/brokers/registry.py" = ["PLC0415"]
