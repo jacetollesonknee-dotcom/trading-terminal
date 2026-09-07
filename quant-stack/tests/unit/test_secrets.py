@@ -17,6 +17,7 @@ from keyring.errors import PasswordDeleteError
 from config.secrets import (
     SchwabAppCredentials,
     SchwabToken,
+    app_credentials_from_env_file,
     delete_schwab_app_credentials,
     delete_schwab_token,
     get_schwab_app_credentials,
@@ -200,3 +201,38 @@ def test_import_token_file_rejects_non_object(tmp_path: Path) -> None:
     path.write_text("[1, 2, 3]", encoding="utf-8")
     with pytest.raises(ValueError, match="JSON object"):
         import_token_file(path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  App credentials from an existing .env
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_app_credentials_from_terminal_env_file(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text(
+        "# terminal app keys\n"
+        "SCHWAB_API_KEY=abc123\n"
+        'SCHWAB_SECRET="s3cret"\n'
+        "ANTHROPIC_API_KEY=sk-ant-x\n"
+        "PAPER_TRADING=true\n",
+        encoding="utf-8",
+    )
+    creds = app_credentials_from_env_file(env)
+    assert creds.app_key == "abc123"
+    assert creds.app_secret == "s3cret"  # quotes stripped
+    assert env.read_text(encoding="utf-8").startswith("# terminal")  # never written
+
+
+def test_app_credentials_from_env_file_accepts_alternate_names(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("SCHWAB_APP_KEY=k\nSCHWAB_APP_SECRET=s\n", encoding="utf-8")
+    creds = app_credentials_from_env_file(env)
+    assert (creds.app_key, creds.app_secret) == ("k", "s")
+
+
+def test_app_credentials_from_env_file_requires_both(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("SCHWAB_API_KEY=k\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="SCHWAB_SECRET"):
+        app_credentials_from_env_file(env)

@@ -209,6 +209,31 @@ def delete_schwab_app_credentials(*, env: str = "production") -> bool:
         return False
 
 
+def app_credentials_from_env_file(path: Path) -> SchwabAppCredentials:
+    """Read the app key + secret from a ``KEY=VALUE`` file (e.g. the terminal's ``.env``).
+
+    Accepts ``SCHWAB_API_KEY``/``SCHWAB_SECRET`` (the terminal app's names) or
+    ``SCHWAB_APP_KEY``/``SCHWAB_APP_SECRET``. This is a one-time migration
+    INTO the keychain; the ``.env`` is read, never written.
+
+    Raises:
+        ValueError: The file lacks a key or a secret.
+    """
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip().upper()] = value.strip().strip("\"'")
+    app_key = values.get("SCHWAB_API_KEY") or values.get("SCHWAB_APP_KEY") or ""
+    secret = values.get("SCHWAB_SECRET") or values.get("SCHWAB_APP_SECRET") or ""
+    if not app_key or not secret:
+        msg = f"{path}: need SCHWAB_API_KEY and SCHWAB_SECRET (or SCHWAB_APP_KEY/SCHWAB_APP_SECRET)"
+        raise ValueError(msg)
+    return SchwabAppCredentials(app_key=app_key, app_secret=secret)
+
+
 def import_token_file(path: Path, *, env: str = "production") -> SchwabToken:
     """Seed the keychain from a token file already on disk (e.g. ``schwab-py``'s).
 
@@ -249,6 +274,11 @@ def _cli() -> int:
         action="store_true",
         help="Store the app key + secret from developer.schwab.com (prompts; nothing echoed).",
     )
+    p.add_argument(
+        "--set-schwab-app-from-env-file",
+        metavar="PATH",
+        help="Seed the app key + secret from an existing KEY=VALUE file (e.g. terminal/.env).",
+    )
     p.add_argument("--delete-schwab-app", action="store_true")
     p.add_argument("--env", default="production", choices=["production", "sandbox"])
     args = p.parse_args()
@@ -258,6 +288,7 @@ def _cli() -> int:
         (args.set_schwab_token, _cli_set_token),
         (bool(args.import_token_file), _cli_import_token),
         (args.set_schwab_app, _cli_set_app),
+        (bool(args.set_schwab_app_from_env_file), _cli_set_app_from_env_file),
         (args.delete_schwab_app, _cli_delete_app),
         (args.delete_schwab_token, _cli_delete_token),
     )
@@ -298,6 +329,14 @@ def _cli_set_app(args: argparse.Namespace) -> int:
         return 1
     set_schwab_app_credentials(SchwabAppCredentials(key, secret), env=args.env)
     print("OK — stored in OS keychain.")
+    return 0
+
+
+def _cli_set_app_from_env_file(args: argparse.Namespace) -> int:
+    creds = app_credentials_from_env_file(Path(args.set_schwab_app_from_env_file))
+    set_schwab_app_credentials(creds, env=args.env)
+    print(f"OK — app credentials for env={args.env} stored in OS keychain "
+          f"(key ends ...{creds.app_key[-4:]}).")
     return 0
 
 
