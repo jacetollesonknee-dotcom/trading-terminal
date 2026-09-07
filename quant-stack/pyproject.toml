@@ -119,7 +119,7 @@ namespace_packages = true
 [[tool.mypy.overrides]]
 module = [
     "hmmlearn.*", "QuantLib.*", "arch.*", "statsmodels.*", "keyring.*",
-    "pyarrow.*", "duckdb.*", "filelock.*", "hypothesis.*", "pandas.*",
+    "pyarrow.*", "duckdb.*", "filelock.*", "hypothesis.*", "pandas.*", "scipy.*",
 ]
 ignore_missing_imports = true
 

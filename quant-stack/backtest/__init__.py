@@ -16,6 +16,13 @@ options-aware backtester described in the project brief.
 from __future__ import annotations
 
 from backtest.config import BacktestConfig
+from backtest.deflated_sharpe import (
+    DeflatedSharpeResult,
+    deannualize_sharpe,
+    deflated_sharpe,
+    expected_max_sharpe,
+    probabilistic_sharpe,
+)
 from backtest.engine import run_backtest
 from backtest.metrics import PerformanceMetrics, compute_metrics
 from backtest.result import BacktestResult
@@ -23,7 +30,12 @@ from backtest.result import BacktestResult
 __all__ = [
     "BacktestConfig",
     "BacktestResult",
+    "DeflatedSharpeResult",
     "PerformanceMetrics",
     "compute_metrics",
+    "deannualize_sharpe",
+    "deflated_sharpe",
+    "expected_max_sharpe",
+    "probabilistic_sharpe",
     "run_backtest",
 ]

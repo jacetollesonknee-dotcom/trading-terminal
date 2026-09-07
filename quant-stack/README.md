@@ -155,6 +155,25 @@ Design notes:
   distinct from the Phase 2 event-driven, options-aware backtester the brief
   plans for US equity options.
 
+### Deflated Sharpe (`backtest/deflated_sharpe.py`)
+
+If you tested N variations and kept the best, its Sharpe is inflated by
+selection. `deflated_sharpe` (Bailey & López de Prado 2014) gives the
+probability the observed Sharpe beats the best-of-N-noise expectation:
+
+```python
+from backtest import deannualize_sharpe, deflated_sharpe
+
+trials = [deannualize_sharpe(m.sharpe, 365) for m in every_variation_you_ran]
+res = deflated_sharpe(result.ledger["net"], trial_sharpes=trials)
+res.deflated_sharpe, res.passes   # probability, and >= 0.95 by default
+```
+
+Everything is **per-period, never annualized** — the Sharpe and moments are
+derived from the return series itself so the units can't be mixed up, and
+`SR*` is scaled by the dispersion of the trials as the paper requires. Be
+honest about `trial_sharpes`: its length and spread are what deflate the result.
+
 ## ADRs (architecture decisions)
 
 | # | Title | Status |
