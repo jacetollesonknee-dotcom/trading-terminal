@@ -21,7 +21,7 @@ class BacktestResult:
 
     Attributes:
         ledger: Per-bar DataFrame — ``returns, position, turnover, gross,
-            funding, costs, net, equity``.
+            carry, costs, net, equity``.
         config: The :class:`BacktestConfig` the run used.
         metrics: Summary :class:`PerformanceMetrics`.
     """

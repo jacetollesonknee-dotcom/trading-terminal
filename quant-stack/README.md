@@ -100,7 +100,8 @@ quant-stack/
 ├── README.md
 ├── .pre-commit-config.yaml
 ├── .github/workflows/ci.yml
-├── backtest/                # vectorized crypto backtester (see below)
+├── backtest/                # vectorized engine + validation stack (see below)
+├── options/                 # GEX analytics + naked-only options simulator
 ├── config/                  # settings + OS keychain wrappers
 ├── ingestion/               # Schwab client + ingested-record schemas
 ├── memory/                  # structured YAML (schemas in _schemas/) + episodic SQLite
@@ -121,36 +122,55 @@ quant-stack/
 Future directories (added in their phases): `models/`, `signals/`,
 `risk/`, `execution/`, `reporting/`, `monitoring/`, `mcp_server/`.
 
-## Vectorized crypto backtester (`backtest/`)
+## Backtesting and validation (`backtest/`, `options/`)
 
-A fast, look-ahead-safe backtester for target-position signals on a single
-crypto instrument. Feed it close prices and a per-bar target position; it
-returns an equity curve, a cost-aware P&L ledger, and performance metrics.
+Two engines, one ledger shape, one validation stack.
 
-**Run the whole chain on real BTC-USD data in one command:**
+- **`backtest.run_backtest`** — vectorized, look-ahead-safe, prices a *linear*
+  position in an underlying. Fast signal research.
+- **`options.simulate`** — event-driven over chain snapshots, **naked-only
+  enforced in code** (long call, long put, cash-secured put, covered call).
+  Fills at bid/ask, marks at mid, settles at expiry. This is the Phase 2
+  options backtester.
+
+Both emit the same ledger, so metrics, deflated Sharpe, regime attribution,
+and the health monitor apply to either.
+
+**Options quickstart** (synthetic chains until your Schwab capture fills the store):
 
 ```bash
 cd quant-stack
-uv sync --all-extras                                   # once
-uv run python examples/crypto_quickstart.py            # pulls 5y of BTC-USD from Yahoo
-uv run python examples/crypto_quickstart.py --synthetic # no network
+uv sync --all-extras                                    # once
+uv run python examples/gex_naked_options.py --synthetic
 ```
 
-That script is the map: data → N variations + deflated Sharpe → walk-forward
-→ regime attribution → sizing → health check. Copy it and swap in your own
-`signal_fn` / `fit_fn`.
+```python
+from options import Book, ContractKey, SimConfig, gex_profile, simulate
+
+def strategy(chain, pf):                   # chain at as_of + Portfolio(book, cash, equity)
+    prof = gex_profile(chain)              # net GEX, call/put walls, gamma flip
+    if prof.dealer_gamma == "long" and not pf.book.options and pf.can_secure_puts(prof.put_wall):
+        return pf.book.with_option(ContractKey(exp, prof.put_wall, OptionRight.put), -1)  # CSP
+    return pf.book
+
+sim = simulate(chain_snapshots, strategy, SimConfig(initial_capital=50_000))
+sim.result.metrics.sharpe     # same PerformanceMetrics as the vectorized engine
+sim.fills, sim.settlements    # every execution and expiry, for reconciliation
+```
+
+A naked short call, or a short put without its strike notional in cash,
+raises `NakedOnlyError` and stops the run — the code-level twin of the
+schema's `AllowedStructure` gate.
+
+**Vectorized engine** for a linear position:
 
 ```python
-import pandas as pd
 from backtest import BacktestConfig, run_backtest
-
 # prices: pd.Series of closes, ascending UTC DatetimeIndex, strictly positive.
 # signal: target position in [-1, 1], SAME index, computed from data available
 #         AT that timestamp.
-result = run_backtest(prices, signal, BacktestConfig())
-result.metrics.sharpe          # annualized (365 periods/yr for daily crypto)
-result.metrics.max_drawdown
-result.equity_curve            # pd.Series
+result = run_backtest(prices, signal, BacktestConfig())   # 252 periods/yr default
+result.metrics.sharpe, result.metrics.max_drawdown, result.equity_curve
 ```
 
 Design notes:
@@ -162,11 +182,9 @@ Design notes:
   timestamps, and non-positive prices are hard errors, not quiet repairs. A
   `NaN` in the *signal* is the one tolerated gap — it means "flat".
 - **Costs.** Turnover (`|Δposition|`) is charged in bps of notional (fee +
-  slippage), plus an optional per-bar funding carry on the held position for
-  perpetual-swap strategies.
-- This is the **vectorized** backtester for fast crypto signal research. It is
-  distinct from the Phase 2 event-driven, options-aware backtester the brief
-  plans for US equity options.
+  slippage), plus an optional per-bar carry on the held position. The options
+  simulator instead pays the real spread (buy at ask, sell at bid) plus
+  per-contract commission — there is no slippage knob to set to zero.
 
 ### Deflated Sharpe (`backtest/deflated_sharpe.py`)
 

@@ -1,8 +1,7 @@
-"""Configuration for the vectorized crypto backtester.
+"""Configuration for the vectorized backtester.
 
-Crypto-specific defaults: markets trade 24/7 so a "year" is 365 periods for
-daily bars, spreads are wider than equities (hence a non-trivial slippage
-default), and there is no exchange holiday calendar to reason about.
+Defaults are for US equities on daily bars (252 periods per year). Set
+``periods_per_year`` to match your bar interval — 252*6.5 for hourly, etc.
 
 The config is a frozen dataclass — construct once, never mutate. All economic
 assumptions a run depends on live here so a result can be reproduced from
@@ -24,18 +23,17 @@ class BacktestConfig:
             notional. Turnover is ``|Δposition|``, so a full round trip
             (0 → 1 → 0) is charged twice — once entering, once exiting.
         slippage_bps: Modelled execution slippage per unit of turnover, in
-            basis points. Crypto spreads are wider than equities; do not set
-            this to zero for a realistic run.
+            basis points. Do not set this to zero for a realistic run.
         max_leverage: Absolute cap applied to the target position after the
             execution lag. ``1.0`` means fully invested, never levered.
         periods_per_year: Bars per year, used to annualize returns and
-            volatility. 365 for daily crypto bars; 365*24 for hourly, etc.
+            volatility. 252 for daily equity bars; 252*6.5 for hourly, etc.
         execution_lag: Number of bars between a signal being *observed* and the
             position being *held*. MUST be >= 1: this is the no-look-ahead
             guarantee — you act on the next bar, never the one you just saw.
-        funding_bps_per_year: Annualized carry charged on the absolute position
-            each bar, in basis points. Models perpetual-swap funding / borrow
-            cost. Default 0.0 (spot, no carry).
+        carry_bps_per_year: Annualized carry charged on the absolute position
+            each bar, in basis points. Models borrow / margin cost on a held
+            position. Default 0.0 (no carry).
         risk_free_rate: Annualized risk-free rate (as a decimal, log-space) used
             as the benchmark in Sharpe / Sortino. Default 0.0.
     """
@@ -44,9 +42,9 @@ class BacktestConfig:
     fee_bps: float = 5.0
     slippage_bps: float = 3.0
     max_leverage: float = 1.0
-    periods_per_year: int = 365
+    periods_per_year: int = 252
     execution_lag: int = 1
-    funding_bps_per_year: float = 0.0
+    carry_bps_per_year: float = 0.0
     risk_free_rate: float = 0.0
 
     def __post_init__(self) -> None:
@@ -70,8 +68,8 @@ class BacktestConfig:
             # close produced the signal — the canonical look-ahead bug.
             msg = f"execution_lag must be >= 1 (no look-ahead), got {self.execution_lag}"
             raise ValueError(msg)
-        if self.funding_bps_per_year < 0:
-            msg = f"funding_bps_per_year must be >= 0, got {self.funding_bps_per_year}"
+        if self.carry_bps_per_year < 0:
+            msg = f"carry_bps_per_year must be >= 0, got {self.carry_bps_per_year}"
             raise ValueError(msg)
 
     @property
@@ -80,6 +78,6 @@ class BacktestConfig:
         return (self.fee_bps + self.slippage_bps) / 1e4
 
     @property
-    def funding_rate_per_period(self) -> float:
-        """Funding/borrow charged per bar, as a fraction of absolute position."""
-        return (self.funding_bps_per_year / 1e4) / self.periods_per_year
+    def carry_rate_per_period(self) -> float:
+        """Carry charged per bar, as a fraction of absolute position."""
+        return (self.carry_bps_per_year / 1e4) / self.periods_per_year

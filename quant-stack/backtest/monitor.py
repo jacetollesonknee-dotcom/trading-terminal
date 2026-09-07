@@ -102,7 +102,7 @@ class HealthConfig:
 
     window: int = 30
     min_obs: int = 20
-    periods_per_year: int = 365
+    periods_per_year: int = 252
     decay_alpha: float = 0.05
     consecutive_required: int = 3
     drawdown_multiple: float = 1.0

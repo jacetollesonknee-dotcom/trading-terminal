@@ -1,16 +1,14 @@
-"""Vectorized crypto backtesting.
+"""Backtesting and validation toolkit.
 
-A lightweight, look-ahead-safe backtester for target-position signals on a
-single crypto instrument. Feed it close prices and a per-bar target position;
-it returns an equity curve, a cost-aware P&L ledger, and performance metrics.
+The vectorized engine (:func:`run_backtest`) prices a linear position in an
+underlying; the options simulator in :mod:`options.simulator` prices a
+naked-only options book over chain snapshots. Both produce the same ledger
+shape, so the validation tools here — metrics, deflated Sharpe, walk-forward,
+regime attribution, sizing, health monitor — apply to either.
 
     >>> from backtest import BacktestConfig, run_backtest
     >>> result = run_backtest(prices, signal, BacktestConfig())
     >>> result.metrics.sharpe
-
-This is the *vectorized* backtester for fast signal research on crypto (24/7,
-no options, no calendar). It is distinct from the Phase 2 event-driven,
-options-aware backtester described in the project brief.
 """
 
 from __future__ import annotations

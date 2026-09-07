@@ -1,9 +1,12 @@
-"""Vectorized crypto backtester — the no-look-ahead core.
+"""Vectorized backtester — the no-look-ahead core.
 
 One function, :func:`run_backtest`, turns a price series and a target-position
 signal into a per-bar P&L ledger and an equity curve. It is deliberately
 vectorized (pandas, no Python loop over bars) so a multi-year daily backtest
-runs in milliseconds.
+runs in milliseconds. It prices a *linear* position in the underlying; for
+options, see :mod:`options.simulator`, which produces the same ledger shape
+so every downstream tool (metrics, deflated Sharpe, regimes, monitor) works
+on both.
 
 The single most important line in this module is the ``.shift(cfg.execution_lag)``
 that turns a *signal* (computed from data available up to and including bar *t*)
@@ -12,8 +15,7 @@ the one you just saw. :class:`~backtest.config.BacktestConfig` refuses a lag
 below 1, so this guarantee cannot be configured away.
 
 Costs are charged on turnover (``|Δposition|``) in basis points of notional,
-plus an optional per-bar funding carry on the absolute position for
-perpetual-swap strategies.
+plus an optional per-bar carry on the absolute position (borrow / margin).
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from backtest.config import BacktestConfig
 from backtest.result import BacktestResult
 
 # Columns of the returned ledger, in order.
-_COLUMNS = ("returns", "position", "turnover", "gross", "funding", "costs", "net", "equity")
+_COLUMNS = ("returns", "position", "turnover", "gross", "carry", "costs", "net", "equity")
 
 # Minimum bars needed to compute a single return.
 _MIN_OBSERVATIONS = 2
@@ -118,10 +120,10 @@ def run_backtest(
     turnover = position.diff().abs().fillna(0.0)
     costs = turnover * cfg.cost_rate
 
-    # Optional perpetual-swap funding / borrow carry on the held notional.
-    funding = position.abs() * cfg.funding_rate_per_period
+    # Optional borrow / margin carry on the held notional.
+    carry = position.abs() * cfg.carry_rate_per_period
 
-    net = gross - costs - funding
+    net = gross - costs - carry
     equity = cfg.initial_capital * np.exp(net.cumsum())
 
     ledger = pd.DataFrame(
@@ -130,7 +132,7 @@ def run_backtest(
             "position": position,
             "turnover": turnover,
             "gross": gross,
-            "funding": funding,
+            "carry": carry,
             "costs": costs,
             "net": net,
             "equity": equity,

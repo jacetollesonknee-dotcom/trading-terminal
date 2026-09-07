@@ -70,14 +70,14 @@ def test_short_profits_when_price_falls() -> None:
     assert result.equity_curve.iloc[-1] > 10_000.0
 
 
-def test_funding_charged_on_held_position() -> None:
+def test_carry_charged_on_held_position() -> None:
     prices = _prices([100, 100, 100])
     signal = pd.Series(1.0, index=prices.index)
-    cfg = BacktestConfig(fee_bps=0.0, slippage_bps=0.0, funding_bps_per_year=365.0)
+    cfg = BacktestConfig(fee_bps=0.0, slippage_bps=0.0, carry_bps_per_year=252.0)
     result = run_backtest(prices, signal, cfg)
-    # Flat prices, but a held long pays funding once it's on (bars 1 and 2).
+    # Flat prices, but a held long pays carry once it's on (bars 1 and 2).
     assert result.equity_curve.iloc[-1] < 10_000.0
-    assert result.ledger["funding"].sum() > 0.0
+    assert result.ledger["carry"].sum() > 0.0
 
 
 def test_nan_signal_treated_as_flat() -> None:

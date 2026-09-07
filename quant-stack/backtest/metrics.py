@@ -120,7 +120,7 @@ def compute_metrics(ledger: pd.DataFrame, cfg: BacktestConfig) -> PerformanceMet
     total_turnover = float(turnover.sum())
     avg_turnover = float(turnover.mean())
     num_trades = int((turnover > 0).sum())
-    total_cost_drag = float(ledger["costs"].sum() + ledger["funding"].sum())
+    total_cost_drag = float(ledger["costs"].sum() + ledger["carry"].sum())
 
     return PerformanceMetrics(
         n_periods=n_periods,

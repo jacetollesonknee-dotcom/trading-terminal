@@ -22,7 +22,7 @@ from hypothesis import strategies as st
 
 from backtest import BacktestConfig, run_backtest
 
-_AFFECTED = ["position", "turnover", "gross", "funding", "costs", "net", "equity"]
+_AFFECTED = ["position", "turnover", "gross", "carry", "costs", "net", "equity"]
 
 
 @st.composite
@@ -59,7 +59,7 @@ def test_future_signal_never_moves_the_past(
     scenario: tuple[pd.Series, pd.Series, int, float, int],
 ) -> None:
     prices, signal, j, new_value, lag = scenario
-    cfg = BacktestConfig(execution_lag=lag, funding_bps_per_year=100.0)
+    cfg = BacktestConfig(execution_lag=lag, carry_bps_per_year=100.0)
 
     base = run_backtest(prices, signal, cfg).ledger
 

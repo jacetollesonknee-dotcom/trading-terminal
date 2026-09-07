@@ -139,7 +139,7 @@ def test_insufficient_data_makes_no_claims() -> None:
 
 def test_reports_standard_error_of_live_sharpe() -> None:
     rep = health_check(_live(0.001, 0.02, 90, 0), _bench(), HealthConfig(window=30))
-    assert rep.live_sharpe_se == pytest.approx(math.sqrt(365 / 30))
+    assert rep.live_sharpe_se == pytest.approx(math.sqrt(252 / 30))
 
 
 def test_recommendation_vocabulary_never_includes_an_action() -> None:
@@ -164,7 +164,7 @@ def test_benchmark_from_result() -> None:
     prices = pd.Series(100 * np.exp(np.cumsum(rng.normal(0.001, 0.02, 400))), index=_idx(400))
     result = run_backtest(prices, pd.Series(1.0, index=prices.index), BacktestConfig())
     b = Benchmark.from_result(result)
-    assert b.sharpe_per_period == pytest.approx(result.metrics.sharpe / math.sqrt(365))
+    assert b.sharpe_per_period == pytest.approx(result.metrics.sharpe / math.sqrt(252))
     assert b.max_drawdown == result.metrics.max_drawdown
     assert b.longest_underwater_bars is not None and b.longest_underwater_bars >= 0
 
