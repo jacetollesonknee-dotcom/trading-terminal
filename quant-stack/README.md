@@ -174,6 +174,32 @@ derived from the return series itself so the units can't be mixed up, and
 `SR*` is scaled by the dispersion of the trials as the paper requires. Be
 honest about `trial_sharpes`: its length and spread are what deflate the result.
 
+### Walk-forward (`backtest/walk_forward.py`)
+
+Fit on the past, trade the unseen future, roll:
+
+```python
+from backtest import FittedStrategy, WalkForwardConfig, walk_forward
+
+def fit(train: pd.Series) -> FittedStrategy:
+    lookback = pick_lookback(train)                     # sees train ONLY
+    def signal(history: pd.Series) -> pd.Series:        # sees history through the test window
+        ma = history.rolling(lookback).mean()
+        return (history > ma).astype(float).where(ma.notna())
+    return FittedStrategy(signal_fn=signal, params={"lookback": lookback})
+
+res = walk_forward(prices, fit, BacktestConfig(), WalkForwardConfig(train_bars=180, test_bars=60))
+res.result.metrics.sharpe   # headline: ONE backtest over the stitched OOS span
+res.fold_metrics            # per-fold diagnostics (noisy — consistency, not results)
+res.param_table             # fitted params per fold; instability = overfitting tell
+```
+
+Two departures from the textbook loop: the signal function receives
+contiguous history *through* the test window so lookback indicators aren't
+cold-started every fold (the engine's `execution_lag` guards the future, not
+the slice), and out-of-sample signals are stitched into a single backtest so
+positions carry across fold boundaries instead of restarting flat each fold.
+
 ## ADRs (architecture decisions)
 
 | # | Title | Status |

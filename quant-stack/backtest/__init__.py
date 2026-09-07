@@ -23,19 +23,34 @@ from backtest.deflated_sharpe import (
     expected_max_sharpe,
     probabilistic_sharpe,
 )
-from backtest.engine import run_backtest
+from backtest.engine import run_backtest, validate_prices
 from backtest.metrics import PerformanceMetrics, compute_metrics
 from backtest.result import BacktestResult
+from backtest.walk_forward import (
+    FitFn,
+    FittedStrategy,
+    Fold,
+    WalkForwardConfig,
+    WalkForwardResult,
+    walk_forward,
+)
 
 __all__ = [
     "BacktestConfig",
     "BacktestResult",
     "DeflatedSharpeResult",
+    "FitFn",
+    "FittedStrategy",
+    "Fold",
     "PerformanceMetrics",
+    "WalkForwardConfig",
+    "WalkForwardResult",
     "compute_metrics",
     "deannualize_sharpe",
     "deflated_sharpe",
     "expected_max_sharpe",
     "probabilistic_sharpe",
     "run_backtest",
+    "validate_prices",
+    "walk_forward",
 ]

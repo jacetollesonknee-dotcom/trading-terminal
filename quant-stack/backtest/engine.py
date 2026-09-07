@@ -31,29 +31,21 @@ _COLUMNS = ("returns", "position", "turnover", "gross", "funding", "costs", "net
 _MIN_OBSERVATIONS = 2
 
 
-def _validate_inputs(prices: pd.Series, signal: pd.Series) -> None:
-    """Reject inputs that would silently corrupt a backtest.
+def validate_prices(prices: pd.Series) -> None:
+    """Reject a price series that would silently corrupt a backtest.
 
-    No silent fallbacks: misaligned indices, non-monotonic time, duplicate
-    timestamps, and non-positive prices are hard errors, not quietly-repaired
-    warnings. ``NaN`` in the *signal* is the one tolerated gap — it is treated
-    as "no position" (flat), which is a legitimate warm-up state.
+    Shared by :func:`run_backtest` and the walk-forward driver. Non-monotonic
+    time, duplicate timestamps, and non-positive prices are hard errors, not
+    quietly-repaired warnings.
     """
     if not isinstance(prices, pd.Series):
         msg = f"prices must be a pandas Series, got {type(prices).__name__}"
-        raise TypeError(msg)
-    if not isinstance(signal, pd.Series):
-        msg = f"signal must be a pandas Series, got {type(signal).__name__}"
         raise TypeError(msg)
     if len(prices) < _MIN_OBSERVATIONS:
         msg = (
             f"prices needs >= {_MIN_OBSERVATIONS} observations to compute a return, "
             f"got {len(prices)}"
         )
-        raise ValueError(msg)
-    if not prices.index.equals(signal.index):
-        # Reindexing would fabricate or drop bars silently — refuse instead.
-        msg = "prices and signal must share the exact same index"
         raise ValueError(msg)
     if not isinstance(prices.index, pd.DatetimeIndex):
         msg = "prices/signal must be indexed by a DatetimeIndex"
@@ -70,6 +62,22 @@ def _validate_inputs(prices: pd.Series, signal: pd.Series) -> None:
     if (prices <= 0).any():
         # Log returns are undefined for non-positive prices.
         msg = "prices must be strictly positive"
+        raise ValueError(msg)
+
+
+def _validate_inputs(prices: pd.Series, signal: pd.Series) -> None:
+    """Validate the price series, then the signal against it.
+
+    ``NaN`` in the *signal* is the one tolerated gap — it is treated as "no
+    position" (flat), which is a legitimate warm-up state. A misaligned index
+    is not tolerated: reindexing would fabricate or drop bars silently.
+    """
+    validate_prices(prices)
+    if not isinstance(signal, pd.Series):
+        msg = f"signal must be a pandas Series, got {type(signal).__name__}"
+        raise TypeError(msg)
+    if not prices.index.equals(signal.index):
+        msg = "prices and signal must share the exact same index"
         raise ValueError(msg)
 
 
