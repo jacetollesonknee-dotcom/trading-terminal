@@ -14,6 +14,7 @@ from backtest import compute_metrics
 from ingestion.schema import OptionContract, OptionRight, OptionsChainSnapshot
 from options import (
     Book,
+    CollateralError,
     ContractKey,
     MarkError,
     NakedOnlyError,
@@ -233,3 +234,116 @@ def test_flat_strategy_has_flat_equity() -> None:
     sim = simulate(_chains([100.0, 110.0, 90.0]), lambda _c, pf: pf.book)
     assert (sim.result.ledger["equity"] == 10_000.0).all()
     assert sim.fills == ()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Spreads — off by default, defined-risk collateral when on
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PUT_90 = ContractKey(_EXP, 90.0, OptionRight.put)
+_CALL_105 = ContractKey(_EXP, 105.0, OptionRight.call)
+_CALL_110 = ContractKey(_EXP, 110.0, OptionRight.call)
+
+
+def _book(*legs: tuple[ContractKey, int]) -> Book:
+    b = Book()
+    for key, qty in legs:
+        b = b.with_option(key, qty)
+    return b
+
+
+def _hold(book: Book):  # type: ignore[no-untyped-def]
+    return lambda _c, pf: pf.book if pf.book.options else book
+
+
+def test_credit_put_spread_refused_by_default_allowed_when_switched_on() -> None:
+    # Short 95 put / long 90 put: $500 width. $2k cash can't cash-secure a 95
+    # put ($9,500), so naked-only refuses; with spreads on, $500 collateral is fine.
+    spread = _book((_PUT_95, -1), (_PUT_90, 1))
+    with pytest.raises(NakedOnlyError, match="cash-secured"):
+        simulate(_chains([100.0, 100.0]), _hold(spread), SimConfig(initial_capital=2_000.0))
+    sim = simulate(
+        _chains([100.0, 100.0]), _hold(spread),
+        SimConfig(initial_capital=2_000.0, allow_spreads=True),
+    )
+    assert sim.final_book.options == {_PUT_95: -1, _PUT_90: 1}
+
+
+def test_spread_collateral_is_the_width_and_is_enforced() -> None:
+    spread = _book((_PUT_95, -1), (_PUT_90, 1))  # width $500
+    with pytest.raises(CollateralError, match=r"\$500"):
+        simulate(
+            _chains([100.0, 100.0]), _hold(spread),
+            SimConfig(initial_capital=300.0, allow_spreads=True),
+        )
+
+
+def test_debit_spread_needs_no_extra_collateral() -> None:
+    # Long 100 call / short 105 call: max loss is the debit already paid.
+    debit = _book((_CALL_100, 1), (_CALL_105, -1))
+    sim = simulate(
+        _chains([100.0, 100.0]), _hold(debit),
+        SimConfig(initial_capital=2_000.0, allow_spreads=True),
+    )
+    assert sim.final_book.options[_CALL_105] == -1
+
+
+def test_naked_short_call_still_refused_with_spreads_on() -> None:
+    with pytest.raises(NakedOnlyError, match="uncovered"):
+        simulate(
+            _chains([100.0, 100.0]), _hold(_book((_CALL_105, -1))),
+            SimConfig(initial_capital=100_000.0, allow_spreads=True),
+        )
+
+
+def test_iron_condor() -> None:
+    condor = _book((_PUT_95, -1), (_PUT_90, 1), (_CALL_105, -1), (_CALL_110, 1))
+    sim = simulate(
+        _chains([100.0, 100.0]), _hold(condor),
+        SimConfig(initial_capital=1_500.0, allow_spreads=True),  # $500 + $500 width
+    )
+    assert len(sim.final_book.options) == 4
+    with pytest.raises(CollateralError):
+        simulate(
+            _chains([100.0, 100.0]), _hold(condor),
+            SimConfig(initial_capital=900.0, allow_spreads=True),
+        )
+
+
+def test_long_leg_must_expire_on_or_after_short_leg() -> None:
+    later = date(2026, 4, 17)
+    chains = [
+        synthetic_chain(_T0 + timedelta(days=i), "QQQ", 100.0, [_EXP, later], _STRIKES)
+        for i in range(2)
+    ]
+    # Calendar: short near / long far -> covered.
+    calendar = _book((_PUT_95, -1), (ContractKey(later, 95.0, OptionRight.put), 1))
+    simulate(chains, _hold(calendar), SimConfig(initial_capital=500.0, allow_spreads=True))
+    # Reverse calendar: short far / long near -> the long expires first, no cover.
+    reverse = _book((ContractKey(later, 95.0, OptionRight.put), -1), (_PUT_95, 1))
+    with pytest.raises(NakedOnlyError, match="cash-secured"):
+        simulate(chains, _hold(reverse), SimConfig(initial_capital=500.0, allow_spreads=True))
+
+
+def test_spread_settles_leg_by_leg_at_expiry() -> None:
+    # Short 95 put / long 90 put, spot expires at 92: short pays $300, long pays $0.
+    # Opened 18 days out so both legs carry real premium and a non-zero bid —
+    # a 2-DTE 95 put at spot 100 is worth ~half a cent and has no bid to sell into.
+    chains = [
+        synthetic_chain(_T0, "QQQ", 100.0, [_EXP], _STRIKES),
+        synthetic_chain(datetime(2026, 3, 20, 21, 0, tzinfo=UTC), "QQQ", 92.0, [_EXP], _STRIKES),
+        synthetic_chain(
+            datetime(2026, 3, 21, 21, 0, tzinfo=UTC), "QQQ", 92.0, [date(2026, 4, 17)], _STRIKES
+        ),
+    ]
+    spread = _book((_PUT_95, -1), (_PUT_90, 1))
+
+    def open_once(chain: OptionsChainSnapshot, pf: Portfolio) -> Book:
+        return spread if chain is chains[0] else pf.book
+
+    cfg = SimConfig(initial_capital=2_000.0, commission_per_contract=0.0, allow_spreads=True)
+    sim = simulate(chains, open_once, cfg)
+    settled = {s.key: s for s in sim.settlements}
+    assert settled[_PUT_95].intrinsic == pytest.approx(3.0)
+    assert settled[_PUT_90].intrinsic == pytest.approx(0.0)
+    assert sim.final_book.is_flat

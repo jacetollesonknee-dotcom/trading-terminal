@@ -12,11 +12,19 @@ The simulator diffs that against the current book and trades the difference:
 - **Settles at expiry** at intrinsic value, cash-equivalent. A short put
   assigned or a covered call called away has the same P&L as cash settlement
   at intrinsic; the share leg is not carried past expiry.
-- **Refuses any book that is not naked-only.** A short call needs 100 shares
-  per contract in the same book (covered call); a short put needs its strike
-  notional held in cash (cash-secured put). Anything else raises
-  :class:`NakedOnlyError` and the simulation stops. This is the code-level
-  twin of the schema's ``AllowedStructure`` gate.
+- **Refuses any book that is not naked-only — unless spreads are switched on.**
+  By default a short call needs 100 shares per contract in the same book
+  (covered call) and a short put needs its strike notional held in cash
+  (cash-secured put); anything else raises :class:`NakedOnlyError`. This is
+  the code-level twin of the schema's ``AllowedStructure`` gate.
+
+  With ``SimConfig(allow_spreads=True)`` a short leg may instead be covered by
+  a long leg of the same right expiring on or after it — verticals, iron
+  condors, butterflies, calendars, diagonals. Collateral is the defined risk:
+  the strike width for a credit spread, nothing extra for a debit spread. A
+  book whose collateral exceeds cash raises :class:`CollateralError`. This
+  switch affects research only; the live-order schema stays naked-only until
+  the Phase 8 spread-permissions gate is opened deliberately.
 
 No look-ahead: the strategy sees the chain at ``as_of`` and trades at that
 snapshot's quotes. It never sees the next snapshot.
@@ -50,6 +58,10 @@ _MIN_SNAPSHOTS = 2
 
 class NakedOnlyError(ValueError):
     """The target book contains a structure outside the naked-only allowlist."""
+
+
+class CollateralError(ValueError):
+    """The book is a permitted structure but cash can't cover its defined risk."""
 
 
 class MarkError(ValueError):
@@ -124,11 +136,15 @@ class SimConfig:
         initial_capital: Starting cash.
         commission_per_contract: Charged on every contract traded, each way.
         periods_per_year: Snapshots per year, for annualization.
+        allow_spreads: Off by default (naked-only). On, a long option of the
+            same right expiring on/after a short one may cover it, with the
+            strike width as collateral. Research switch only — see module doc.
     """
 
     initial_capital: float = 10_000.0
     commission_per_contract: float = 0.65
     periods_per_year: int = 252
+    allow_spreads: bool = False
 
     def __post_init__(self) -> None:
         if self.initial_capital <= 0.0:
@@ -199,29 +215,98 @@ def _intrinsic(key: ContractKey, spot: float) -> float:
     return max(key.strike - spot, 0.0)
 
 
-def _enforce_naked_only(book: Book, cash: float) -> None:
-    """Raise unless ``book`` is naked-only and affordable. Order matters: an
-    unaffordable book is a cash problem, not a structure problem."""
+def _cover_with_longs(
+    short: ContractKey, qty: int, longs: dict[ContractKey, int]
+) -> tuple[int, float]:
+    """Cover ``qty`` short contracts with long ones of the same right.
+
+    A long leg can cover a short leg only if it expires on or after it.
+    Pairs to minimise collateral, as a broker would: a long at a strike
+    that makes it a *debit* spread costs nothing extra; otherwise the
+    strike width is at risk. Consumes from ``longs``. Returns
+    ``(uncovered_qty, collateral)``.
+    """
+    is_call = short.right is OptionRight.call
+    eligible = [k for k, q in longs.items() if q > 0 and k.expiration >= short.expiration]
+    # Debit-side longs first (zero collateral), then credit-side by nearest width.
+    def is_debit_side(k: ContractKey) -> bool:
+        return k.strike <= short.strike if is_call else k.strike >= short.strike
+
+    free = [k for k in eligible if is_debit_side(k)]
+    paid = sorted(
+        (k for k in eligible if k not in free),
+        key=lambda k: abs(k.strike - short.strike),
+    )
+    collateral = 0.0
+    remaining = qty
+    for k in [*free, *paid]:
+        if remaining == 0:
+            break
+        use = min(remaining, longs[k])
+        longs[k] -= use
+        remaining -= use
+        if k not in free:
+            collateral += use * abs(k.strike - short.strike) * MULTIPLIER
+    return remaining, collateral
+
+
+def _required_collateral(book: Book, allow_spreads: bool) -> tuple[float, bool]:
+    """Cash the book must hold. Returns ``(collateral, used_spread_cover)``.
+
+    Raises:
+        NakedOnlyError: A short call is covered by neither shares nor (if
+            spreads are allowed) a long call.
+    """
+    total = 0.0
+    used_spread = False
+    for right in (OptionRight.call, OptionRight.put):
+        shorts = sorted(
+            ((k, -q) for k, q in book.options.items() if q < 0 and k.right is right),
+            key=lambda kq: kq[0].strike,
+        )
+        longs = {k: q for k, q in book.options.items() if q > 0 and k.right is right}
+        share_cover = book.shares // MULTIPLIER if right is OptionRight.call else 0
+        for key, qty in shorts:
+            remaining = qty
+            use = min(remaining, share_cover)  # covered calls first
+            share_cover -= use
+            remaining -= use
+            if remaining > 0 and allow_spreads:
+                remaining, width = _cover_with_longs(key, remaining, longs)
+                if width > 0.0 or remaining < qty - use:
+                    used_spread = True
+                total += width
+            if remaining > 0:
+                if right is OptionRight.call:
+                    msg = (
+                        f"{remaining} short call(s) at {key.strike} are uncovered — "
+                        f"need shares{' or a long call' if allow_spreads else ''}. "
+                        f"Naked short calls are not allowed."
+                    )
+                    raise NakedOnlyError(msg)
+                total += remaining * key.strike * MULTIPLIER  # cash-secured put
+    return total, used_spread
+
+
+def _enforce_book(book: Book, cash: float, allow_spreads: bool) -> None:
+    """Raise unless ``book`` is a permitted structure and affordable.
+
+    Order matters: an unaffordable book is a cash problem, not a structure
+    problem, so negative cash is reported first.
+    """
     if cash < 0.0:
         msg = f"cash would be negative (${cash:,.0f}); no margin lending"
         raise ValueError(msg)
-    short_calls = sum(
-        -q for k, q in book.options.items() if q < 0 and k.right is OptionRight.call
-    )
-    if short_calls * MULTIPLIER > book.shares:
+    collateral, used_spread = _required_collateral(book, allow_spreads)
+    if cash < collateral:
+        if used_spread:
+            msg = (
+                f"defined-risk book needs ${collateral:,.0f} collateral; "
+                f"cash after trades is ${cash:,.0f}."
+            )
+            raise CollateralError(msg)
         msg = (
-            f"{short_calls} short call(s) need {short_calls * MULTIPLIER} shares to be "
-            f"covered; book holds {book.shares}. Naked short calls are not allowed."
-        )
-        raise NakedOnlyError(msg)
-    reserve = sum(
-        -q * k.strike * MULTIPLIER
-        for k, q in book.options.items()
-        if q < 0 and k.right is OptionRight.put
-    )
-    if cash < reserve:
-        msg = (
-            f"short puts need ${reserve:,.0f} held in cash to be cash-secured; "
+            f"short puts need ${collateral:,.0f} held in cash to be cash-secured; "
             f"cash after trades is ${cash:,.0f}. Naked short puts are not allowed."
         )
         raise NakedOnlyError(msg)
@@ -319,6 +404,7 @@ def simulate(
 
     Raises:
         NakedOnlyError: The strategy asked for a disallowed structure.
+        CollateralError: A permitted spread's defined risk exceeds cash.
         MarkError: A contract to trade or hold has no usable price.
         ValueError: Bad snapshots, or cash would go negative.
     """
@@ -343,7 +429,7 @@ def simulate(
         )
         target = strategy(chain, Portfolio(book=st.book, cash=st.cash, equity=pre_trade_equity))
         premium_traded, commissions = _trade_to_target(st, target, quotes, spot, chain.as_of, cfg)
-        _enforce_naked_only(st.book, st.cash)
+        _enforce_book(st.book, st.cash, cfg.allow_spreads)
 
         equity = st.cash + _options_value(st.book, quotes, chain.as_of) + st.book.shares * spot
         if equity <= 0.0:

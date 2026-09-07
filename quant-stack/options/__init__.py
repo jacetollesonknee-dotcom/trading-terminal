@@ -23,6 +23,7 @@ from options.gex import GexProfile, gex_by_strike, gex_profile
 from options.pricing import Greeks, bs_greeks, bs_price
 from options.simulator import (
     Book,
+    CollateralError,
     ContractKey,
     Fill,
     MarkError,
@@ -37,6 +38,7 @@ from options.synthetic import synthetic_chain
 
 __all__ = [
     "Book",
+    "CollateralError",
     "ContractKey",
     "Fill",
     "GexProfile",

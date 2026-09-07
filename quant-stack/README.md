@@ -162,6 +162,20 @@ A naked short call, or a short put without its strike notional in cash,
 raises `NakedOnlyError` and stops the run — the code-level twin of the
 schema's `AllowedStructure` gate.
 
+**Spreads** are a research switch, off by default:
+
+```python
+SimConfig(initial_capital=25_000, allow_spreads=True)
+```
+
+On, a short leg may be covered by a long leg of the same right expiring on or
+after it — verticals, iron condors, butterflies, calendars, diagonals. The
+collateral is the defined risk (strike width for a credit spread; nothing
+extra for a debit spread); exceeding cash raises `CollateralError`. A naked
+short call is refused either way. This switch changes what you can *test*.
+The live-order schema stays naked-only until the Phase 8 spread-permissions
+gate is opened on purpose.
+
 **Vectorized engine** for a linear position:
 
 ```python
