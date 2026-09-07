@@ -27,7 +27,8 @@ import getpass
 import json
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Final
 
 import keyring
@@ -47,6 +48,28 @@ def _schwab_service(env: str) -> str:
 
 
 _SCHWAB_USER: Final[str] = "oauth_token"
+_SCHWAB_APP_USER: Final[str] = "app_credentials"
+
+
+@dataclass(frozen=True, slots=True)
+class SchwabAppCredentials:
+    """The app key + secret from developer.schwab.com.
+
+    Needed to refresh tokens (Basic auth on the token endpoint) and to run
+    the authorization flow. Stored in the keychain like the token; never in
+    ``.env``.
+    """
+
+    app_key: str
+    app_secret: str
+
+    def to_json(self) -> str:
+        return json.dumps({"app_key": self.app_key, "app_secret": self.app_secret})
+
+    @classmethod
+    def from_json(cls, raw: str) -> SchwabAppCredentials:
+        data = json.loads(raw)
+        return cls(app_key=str(data["app_key"]), app_secret=str(data["app_secret"]))
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +115,46 @@ class SchwabToken:
         now = datetime.now(UTC)
         return (self.expires_at - now).total_seconds() <= skew_seconds
 
+    @classmethod
+    def from_oauth_response(
+        cls, data: dict[str, object], *, issued_at: datetime | None = None
+    ) -> SchwabToken:
+        """Build from what Schwab's token endpoint returns, or from a token file.
+
+        Accepts three shapes, strictly:
+
+        - The raw endpoint response: ``access_token, refresh_token, token_type,
+          expires_in`` (seconds from ``issued_at``, default now).
+        - The same with ``expires_at`` as a Unix epoch (what ``schwab-py``
+          adds).
+        - ``schwab-py``'s token file, which wraps the above under ``"token"``.
+        """
+        inner = data.get("token")
+        if isinstance(inner, dict):
+            return cls.from_oauth_response(inner, issued_at=issued_at)
+        if "expires_at" in data:
+            raw = data["expires_at"]
+            if isinstance(raw, int | float):
+                expires_at = datetime.fromtimestamp(raw, tz=UTC)
+            else:
+                expires_at = datetime.fromisoformat(str(raw))
+        elif "expires_in" in data:
+            start = issued_at or datetime.now(UTC)
+            expires_at = start + timedelta(seconds=float(str(data["expires_in"])))
+        else:
+            msg = "token response has neither expires_in nor expires_at"
+            raise ValueError(msg)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        scope = data.get("scope")
+        return cls(
+            access_token=str(data["access_token"]),
+            refresh_token=str(data["refresh_token"]),
+            token_type=str(data.get("token_type", "Bearer")),
+            expires_at=expires_at,
+            scope=(str(scope) if scope else None),
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Public API — Schwab
@@ -124,6 +187,43 @@ def delete_schwab_token(*, env: str = "production") -> bool:
         return False
 
 
+def get_schwab_app_credentials(*, env: str = "production") -> SchwabAppCredentials | None:
+    """Read the app key + secret for ``env``; ``None`` if never seeded."""
+    raw = keyring.get_password(_schwab_service(env), _SCHWAB_APP_USER)
+    if raw is None:
+        return None
+    return SchwabAppCredentials.from_json(raw)
+
+
+def set_schwab_app_credentials(creds: SchwabAppCredentials, *, env: str = "production") -> None:
+    """Write (or replace) the app key + secret in the OS keychain."""
+    keyring.set_password(_schwab_service(env), _SCHWAB_APP_USER, creds.to_json())
+
+
+def delete_schwab_app_credentials(*, env: str = "production") -> bool:
+    """Remove the app credentials. Returns False if absent."""
+    try:
+        keyring.delete_password(_schwab_service(env), _SCHWAB_APP_USER)
+        return True
+    except PasswordDeleteError:
+        return False
+
+
+def import_token_file(path: Path, *, env: str = "production") -> SchwabToken:
+    """Seed the keychain from a token file already on disk (e.g. ``schwab-py``'s).
+
+    Reads the JSON, accepts any shape :meth:`SchwabToken.from_oauth_response`
+    does, stores it, and returns it. The file is not modified or deleted.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        msg = f"{path}: expected a JSON object"
+        raise ValueError(msg)
+    token = SchwabToken.from_oauth_response(data)
+    set_schwab_token(token, env=env)
+    return token
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  CLI — one-time seeding from the shell
 # ─────────────────────────────────────────────────────────────────────────────
@@ -136,28 +236,81 @@ def _cli() -> int:
     )
     p.add_argument("--set-schwab-token", action="store_true")
     p.add_argument("--delete-schwab-token", action="store_true")
+    p.add_argument(
+        "--import-token-file",
+        metavar="PATH",
+        help=(
+            "Seed the token from a JSON file on disk "
+            "(raw OAuth response or schwab-py token file)."
+        ),
+    )
+    p.add_argument(
+        "--set-schwab-app",
+        action="store_true",
+        help="Store the app key + secret from developer.schwab.com (prompts; nothing echoed).",
+    )
+    p.add_argument("--delete-schwab-app", action="store_true")
     p.add_argument("--env", default="production", choices=["production", "sandbox"])
     args = p.parse_args()
 
+    # One handler per flag; the first flag set wins.
+    handlers = (
+        (args.set_schwab_token, _cli_set_token),
+        (bool(args.import_token_file), _cli_import_token),
+        (args.set_schwab_app, _cli_set_app),
+        (args.delete_schwab_app, _cli_delete_app),
+        (args.delete_schwab_token, _cli_delete_token),
+    )
     try:
-        if args.set_schwab_token:
-            print(f"Seeding Schwab token for env={args.env}.")
-            print("Paste the OAuth JSON (single line, then enter):")
-            raw = getpass.getpass(prompt="token JSON> ")
-            token = SchwabToken.from_json(raw)
-            set_schwab_token(token, env=args.env)
-            print("OK — stored in OS keychain.")
-            return 0
-        if args.delete_schwab_token:
-            ok = delete_schwab_token(env=args.env)
-            print("Deleted." if ok else "No token to delete.")
-            return 0
+        for chosen, handler in handlers:
+            if chosen:
+                return handler(args)
     except KeyringError as e:
         print(f"keyring error: {e}", file=sys.stderr)
         return 2
 
     p.print_help()
     return 1
+
+
+def _cli_set_token(args: argparse.Namespace) -> int:
+    print(f"Seeding Schwab token for env={args.env}.")
+    print("Paste the OAuth JSON (single line, then enter):")
+    raw = getpass.getpass(prompt="token JSON> ")
+    set_schwab_token(SchwabToken.from_json(raw), env=args.env)
+    print("OK — stored in OS keychain.")
+    return 0
+
+
+def _cli_import_token(args: argparse.Namespace) -> int:
+    token = import_token_file(Path(args.import_token_file), env=args.env)
+    state = "EXPIRED — the client will refresh it" if token.is_expired() else "valid"
+    print(f"OK — imported token for env={args.env} (expires {token.expires_at}, {state}).")
+    return 0
+
+
+def _cli_set_app(args: argparse.Namespace) -> int:
+    print(f"Seeding Schwab app credentials for env={args.env}.")
+    key = getpass.getpass(prompt="app key> ").strip()
+    secret = getpass.getpass(prompt="app secret> ").strip()
+    if not key or not secret:
+        print("Both values are required.", file=sys.stderr)
+        return 1
+    set_schwab_app_credentials(SchwabAppCredentials(key, secret), env=args.env)
+    print("OK — stored in OS keychain.")
+    return 0
+
+
+def _cli_delete_app(args: argparse.Namespace) -> int:
+    ok = delete_schwab_app_credentials(env=args.env)
+    print("Deleted." if ok else "No app credentials to delete.")
+    return 0
+
+
+def _cli_delete_token(args: argparse.Namespace) -> int:
+    ok = delete_schwab_token(env=args.env)
+    print("Deleted." if ok else "No token to delete.")
+    return 0
 
 
 if __name__ == "__main__":

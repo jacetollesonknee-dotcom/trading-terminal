@@ -6,15 +6,17 @@ Three subcommands:
     connect <broker> [--env ENV]   Begin OAuth flow + flip the feature flag.
     connect <broker> --disconnect  Delete token + flip flag back off.
 
-The OAuth flow itself is not wired in this phase — it raises a clear
-``NotImplementedError`` with instructions, because the operator is still
-provisioning Schwab API credentials. The CLI surface, the status
-output, the disconnect path, and the gating are all functional.
+The connect flow is the paste-the-redirect-URL variant of OAuth: no local
+web server, no browser automation. Prerequisite: app credentials in the
+keychain (``python -m config.secrets --set-schwab-app``). If you already
+have a token file from another tool (e.g. schwab-py), skip the flow and
+``python -m config.secrets --import-token-file <path>`` instead.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from typing import Final
 
 from config.secrets import delete_schwab_token, get_schwab_token
@@ -73,26 +75,82 @@ def cmd_status(settings: Settings) -> int:
     return 0
 
 
-def cmd_connect(broker: BrokerName, env: str) -> int:
-    """Begin OAuth flow for ``broker``. NotImplementedError until keys land.
+def cmd_connect(
+    broker: BrokerName,
+    env: str,
+    *,
+    prompt: Callable[[str], str] = input,
+) -> int:
+    """Run the one-time OAuth flow: open a URL, log in, paste the redirect back.
 
-    The flag-flip happens *after* a successful flow. We don't enable a
-    broker that can't actually be talked to.
+    No local web server is needed: after approving, the browser lands on
+    the callback URL (which may show an error page — that's fine); the
+    operator pastes the full address-bar URL here and the ``?code=`` in it
+    is exchanged for a token, which goes to the keychain.
+
+    The feature flag is not flipped here — it lives in ``.env`` — but the
+    exact line to add is printed at the end.
     """
-    print(f"Beginning OAuth flow for broker={broker.value!r} env={env!r}...")
+    from config.secrets import get_schwab_app_credentials, set_schwab_token
+    from config.settings import SchwabEnv
+    from ingestion.schwab_client import (
+        SchwabAuthError,
+        build_authorize_url,
+        exchange_authorization_code,
+    )
+
+    creds = get_schwab_app_credentials(env=env)
+    if creds is None:
+        print(f"No Schwab app credentials in the keychain for env={env!r}.")
+        print("Store your app key + secret from developer.schwab.com first:")
+        print()
+        print(f"    python -m config.secrets --set-schwab-app --env {env}")
+        return 2
+
+    settings = get_settings()
+    redirect_uri = settings.schwab_callback_url
+    url = build_authorize_url(creds.app_key, redirect_uri, SchwabEnv(env))
+    print(f"Connecting broker={broker.value!r} env={env!r}.")
     print()
-    print("  Phase 1.4a: stub. The OAuth flow lands when you have your new")
-    print("  Schwab API credentials provisioned and the callback URL")
-    print("  registered. For now, when your keys are ready, seed the token")
-    print("  manually with:")
+    print("1. Open this URL in a browser, log in to Schwab, and approve the app:")
     print()
-    print(f"    python -m config.secrets --set-schwab-token --env {env}")
+    print(f"   {url}")
     print()
-    print("  Then flip the flag in your .env or settings:")
-    print(f"    brokers_enabled['{broker.value}'] = True")
+    print(f"2. You will be redirected to {redirect_uri} — the page may show an")
+    print("   error; that's expected. Copy the FULL URL from the address bar.")
     print()
-    print("  Future work in this same command will wire the full OAuth flow.")
-    return 2  # advisory — not a hard error, but didn't accomplish a connect
+    redirected = prompt("3. Paste the redirect URL here> ").strip()
+    code = _code_from_redirect(redirected)
+    if code is None:
+        print("That URL has no ?code= parameter. Nothing stored.")
+        return 2
+
+    try:
+        token = exchange_authorization_code(creds, code, redirect_uri, env=SchwabEnv(env))
+    except SchwabAuthError as e:
+        print(f"Schwab rejected the code: {e}")
+        return 2
+    set_schwab_token(token, env=env)
+    print()
+    expires = f"{token.expires_at:%Y-%m-%d %H:%M} UTC"
+    print(f"Connected. Token stored in the keychain (expires {expires};")
+    print("the client refreshes it automatically for 7 days, then re-run this).")
+    print()
+    print("Last step — enable the broker by adding this line to quant-stack/.env:")
+    print()
+    print(f'    BROKERS_ENABLED=\'{{"{broker.value}": true}}\'')
+    return 0
+
+
+def _code_from_redirect(url: str) -> str | None:
+    """Extract ``code`` from the pasted redirect URL; None if absent."""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    query = parse_qs(urlparse(url).query)
+    values = query.get("code")
+    if not values or not values[0]:
+        return None
+    return unquote(values[0])
 
 
 def cmd_disconnect(broker: BrokerName, env: str) -> int:

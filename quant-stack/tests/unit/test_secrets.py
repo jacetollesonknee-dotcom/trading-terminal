@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import keyring
 import pytest
@@ -14,9 +15,14 @@ from keyring.backend import KeyringBackend
 from keyring.errors import PasswordDeleteError
 
 from config.secrets import (
+    SchwabAppCredentials,
     SchwabToken,
+    delete_schwab_app_credentials,
     delete_schwab_token,
+    get_schwab_app_credentials,
     get_schwab_token,
+    import_token_file,
+    set_schwab_app_credentials,
     set_schwab_token,
 )
 
@@ -112,3 +118,85 @@ def test_is_expired() -> None:
     )
     assert fresh.is_expired() is False
     assert stale.is_expired() is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  App credentials
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_app_credentials_round_trip() -> None:
+    assert get_schwab_app_credentials(env="production") is None
+    set_schwab_app_credentials(SchwabAppCredentials("KEY", "SECRET"), env="production")
+    loaded = get_schwab_app_credentials(env="production")
+    assert loaded is not None
+    assert loaded.app_key == "KEY"
+    assert loaded.app_secret == "SECRET"
+    # Separate keychain entry from the token.
+    assert get_schwab_token(env="production") is None
+    assert delete_schwab_app_credentials(env="production") is True
+    assert delete_schwab_app_credentials(env="production") is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Token response shapes
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_from_oauth_response_with_expires_in() -> None:
+    issued = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
+    tok = SchwabToken.from_oauth_response(
+        {"access_token": "A", "refresh_token": "R", "token_type": "Bearer", "expires_in": 1800},
+        issued_at=issued,
+    )
+    assert tok.expires_at == issued + timedelta(seconds=1800)
+    assert tok.scope is None
+
+
+def test_from_oauth_response_with_epoch_expires_at() -> None:
+    tok = SchwabToken.from_oauth_response(
+        {"access_token": "A", "refresh_token": "R", "expires_at": 1_800_000_000, "scope": "api"}
+    )
+    assert tok.expires_at == datetime.fromtimestamp(1_800_000_000, tz=UTC)
+    assert tok.token_type == "Bearer"  # defaulted
+    assert tok.scope == "api"
+
+
+def test_from_oauth_response_schwab_py_wrapper() -> None:
+    wrapped = {
+        "creation_timestamp": 1_700_000_000,
+        "token": {
+            "access_token": "A", "refresh_token": "R", "token_type": "Bearer",
+            "expires_in": 1800, "expires_at": 1_800_000_000,
+        },
+    }
+    tok = SchwabToken.from_oauth_response(wrapped)
+    assert tok.access_token == "A"
+    assert tok.expires_at == datetime.fromtimestamp(1_800_000_000, tz=UTC)
+
+
+def test_from_oauth_response_requires_an_expiry() -> None:
+    with pytest.raises(ValueError, match="expires"):
+        SchwabToken.from_oauth_response({"access_token": "A", "refresh_token": "R"})
+
+
+def test_import_token_file(tmp_path: Path) -> None:
+    path = tmp_path / "token.json"
+    path.write_text(
+        '{"token": {"access_token": "FILE", "refresh_token": "R", '
+        '"token_type": "Bearer", "expires_at": 1800000000}}',
+        encoding="utf-8",
+    )
+    tok = import_token_file(path, env="sandbox")
+    assert tok.access_token == "FILE"
+    stored = get_schwab_token(env="sandbox")
+    assert stored is not None and stored.access_token == "FILE"
+    assert get_schwab_token(env="production") is None
+    assert path.exists()  # the file is left alone
+
+
+def test_import_token_file_rejects_non_object(tmp_path: Path) -> None:
+    path = tmp_path / "bad.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(ValueError, match="JSON object"):
+        import_token_file(path)
