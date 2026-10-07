@@ -1029,6 +1029,49 @@ def rebalanced_mix(returns: pd.DataFrame, weights: Sequence[float], freq: str = 
     return pd.Series(out, index=returns.index)
 
 
+def levered_mix(returns: pd.DataFrame, weights: Sequence[float], leverage: float, cash: pd.Series,
+                borrow_spread: float = 0.005, freq: str = "M", cost_bps: float = 5.0) -> pd.Series:
+    """Constant-leverage portfolio: notional = leverage * (weights . sleeves), reset at `freq`.
+
+    Daily: r = w.r_sleeves + (1 - sum w) * r_cash - max(sum w - 1, 0) * spread / 252
+    The (1 - sum w) term is negative when levered, i.e. the excess notional is borrowed at
+    the cash rate; `borrow_spread` is the financing spread on top.  Between resets the
+    weights drift, so effective leverage rises in drawdowns and falls in rallies (the same
+    path dependence a monthly-reset leveraged fund has).  Equity is floored at zero: a
+    loss of 100 % is terminal.  Transaction cost is charged on turnover at each reset.
+    """
+    w0 = leverage * np.asarray(weights, dtype=float)
+    r = returns.to_numpy(dtype=float)
+    rc = cash.reindex(returns.index).fillna(0.0).to_numpy(dtype=float)
+    mask = rebalance_mask(returns.index, freq)
+    cost = cost_bps * 1e-4
+    w = w0.copy()
+    out = np.zeros(len(r))
+    alive = True
+    for t in range(len(r)):
+        if not alive:
+            out[t] = 0.0
+            continue
+        g = w.sum()
+        rp = float(w @ r[t]) + (1.0 - g) * rc[t] - max(g - 1.0, 0.0) * borrow_spread / TRADING_DAYS
+        if rp <= -1.0:
+            out[t] = -1.0
+            alive = False
+            continue
+        w = w * (1 + r[t]) / (1 + rp)
+        if mask[t]:
+            rp -= cost * np.abs(w0 - w).sum()
+            w = w0.copy()
+        out[t] = rp
+    return pd.Series(out, index=returns.index)
+
+
+def vol_matched_leverage(blend: pd.Series, bench: pd.Series, cap: float = 2.0) -> float:
+    """Leverage that equalises the blend's realised vol with the benchmark's (computed on TRAIN)."""
+    sb_, sv = blend.std(ddof=1), bench.std(ddof=1)
+    return float(min(cap, sv / sb_)) if sb_ > 0 else 1.0
+
+
 # ----------------------------------------------------------------------------
 # STAGE C - ANTI-OVERFITTING ENGINE
 # ----------------------------------------------------------------------------
@@ -1240,6 +1283,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     help="core sleeve for the blend: SPY buy & hold, or a vol-managed, trend-gated SPY core "
                          "with a leverage cap and explicit financing (optimised on TRAIN only)")
     ap.add_argument("--borrow-spread", type=float, default=0.005, help="annual financing spread over cash for exposure > 1")
+    ap.add_argument("--leverage", nargs="*", type=float, default=[1.25, 1.5, 2.0],
+                    help="notional multipliers for the levered blend (monthly reset); a TRAIN vol-matched "
+                         "multiplier is always added. Pass with no values to skip the levered section")
     ap.add_argument("--wfo", action="store_true", help="also run rolling walk-forward optimisation")
     ap.add_argument("--wfo-train-years", type=float, default=6.0)
     ap.add_argument("--wfo-test-years", type=float, default=2.0)
@@ -1413,6 +1459,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(format_table(performance_table(series_cw, rf, "SPY buy & hold")))
             pd.DataFrame(frows).to_csv(out_dir / "core_wfo_folds.csv", index=False)
 
+    blend_key = f"Core {1 - blend_w:.0%} SPY + {blend_w:.0%} Satellite (monthly)"
+    levs = sorted({float(x) for x in (args.leverage or [])})
+    blend_train = rebalanced_mix(pd.concat([spy.iloc[:split], train_res.returns], axis=1), [1 - blend_w, blend_w])
+    L_vm = vol_matched_leverage(blend_train, spy.iloc[:split])
+    if levs or L_vm > 1.0:
+        banner(f"STAGE F  LEVERED BLEND  (monthly reset, financed at cash + {args.borrow_spread:.2%}, "
+               f"vol-matched L fixed on TRAIN = {L_vm:.2f}x)")
+        sleeves = pd.concat([spy.loc[oos], sat_oos], axis=1)
+        series_lev = {"SPY 1.0x": spy.loc[oos], "Blend 1.0x": series_oos[blend_key]}
+        for L in levs:
+            series_lev[f"SPY {L:g}x"] = levered_mix(pd.DataFrame({"spy": spy.loc[oos]}), [1.0], L, rf, args.borrow_spread,
+                                                    cost_bps=args.cost_bps)
+        for L in levs:
+            series_lev[f"Blend {L:g}x"] = levered_mix(sleeves, [1 - blend_w, blend_w], L, rf, args.borrow_spread,
+                                                      cost_bps=args.cost_bps)
+        series_lev[f"Blend vol-matched {L_vm:.2f}x"] = levered_mix(sleeves, [1 - blend_w, blend_w], L_vm, rf,
+                                                                   args.borrow_spread, cost_bps=args.cost_bps)
+        pd.set_option("display.width", 320)
+        print(format_table(performance_table(series_lev, rf, "SPY 1.0x")))
+        print("Read: 'Blend vol-matched' has SPY's TRAIN volatility by construction, so its OOS CAGR and drawdown\n"
+              "are the like-for-like comparison with SPY 1.0x. 'SPY Lx' rows are the control for each multiplier.\n"
+              "Leverage drifts between monthly resets; a 100 % loss is terminal. Financing uses the cash proxy + spread.")
+        ct_lev = crisis_table({k: v for k, v in series_lev.items()}, oos_start)
+        ct_lev = ct_lev[ct_lev["segment"] == "OOS"]
+        if not ct_lev.empty:
+            fmt = ct_lev.copy()
+            for c in series_lev:
+                fmt[c] = fmt[c].map(lambda v: "n/a" if pd.isna(v) else f"{100 * v:+.1f}%")
+            print("\nOOS crisis windows:")
+            print(fmt.drop(columns=["segment"]).to_string(index=False))
+        pd.DataFrame({k: (1 + v).cumprod() for k, v in series_lev.items()}).to_csv(out_dir / "levered_oos_equity_curves.csv")
+
     banner("STAGE D  IN-SAMPLE (TRAIN) RESULTS - for reference only; parameters were fitted here")
     series_is = {"SPY buy & hold": spy.iloc[:split], "Satellite (train)": train_res.returns.rename("Satellite (train)")}
     print(format_table(performance_table(series_is, rf, "SPY buy & hold")))
@@ -1453,8 +1531,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         series_wfo = {"SPY buy & hold": spy.reindex(wfo_ret.index), "Satellite (WFO stitched)": wfo_ret,
                       f"Core {1 - blend_w:.0%} SPY + {blend_w:.0%} Satellite (monthly)":
                           rebalanced_mix(pd.concat([spy.reindex(wfo_ret.index), wfo_ret], axis=1), [1 - blend_w, blend_w])}
+        if levs:
+            sl = pd.concat([spy.reindex(wfo_ret.index), wfo_ret], axis=1)
+            for L in levs:
+                series_wfo[f"Blend {L:g}x (levered, monthly reset)"] = levered_mix(sl, [1 - blend_w, blend_w], L, rf,
+                                                                                  args.borrow_spread, cost_bps=args.cost_bps)
+            series_wfo[f"SPY {max(levs):g}x (control)"] = levered_mix(pd.DataFrame({"spy": spy.reindex(wfo_ret.index)}), [1.0],
+                                                                      max(levs), rf, args.borrow_spread, cost_bps=args.cost_bps)
         print(f"\nStitched OOS period {wfo_ret.index[0].date()} -> {wfo_ret.index[-1].date()} "
               f"({len(folds)} folds, parameters re-fitted every {args.wfo_test_years:g} years)")
+        pd.set_option("display.width", 320)
         print(format_table(performance_table(series_wfo, rf, "SPY buy & hold")))
         stability = folds[["mom_lookback", "min_score", "sma_window", "top_k", "stop_atr_mult", "dc_fast",
                            "dc_slow", "crisis_cap"]].nunique()
