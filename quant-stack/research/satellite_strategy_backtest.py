@@ -770,6 +770,103 @@ def run_engine(u: Universe, ind: Indicators, p: StrategyParams, start: int, end:
 
 
 # ----------------------------------------------------------------------------
+# STAGE E - VOLATILITY-MANAGED, TREND-GATED CORE (optional, --core volmanaged)
+# ----------------------------------------------------------------------------
+# Moreira & Muir (2017): scaling exposure by 1 / realised variance raises Sharpe and
+# cuts drawdowns because volatility is persistent while returns are not.  Faber (2007):
+# a long-horizon SMA gate removes most of the equity left tail.  Combining the two with
+# a leverage cap and explicit financing is the textbook "beat the index on all three"
+# design; whether it does so on this sample is what the OOS test below decides.
+
+@dataclass(frozen=True)
+class CoreParams:
+    vol_target: float = 0.15      # annualised vol target for the equity core
+    lev_cap: float = 1.5          # maximum exposure (1.0 = never levered)
+    vol_window: int = 20          # realised-vol window (days)
+    sma_window: int = 200         # trend gate
+    bear_mult: float = 0.5        # exposure multiplier when SPY < SMA
+    borrow_spread: float = 0.005  # annual financing spread over the cash rate on exposure > 1
+    band: float = 0.05            # no-trade band in exposure units
+
+    def label(self) -> str:
+        return (f"vol_target={self.vol_target:g} lev_cap={self.lev_cap:g} vol_win={self.vol_window} "
+                f"SMA={self.sma_window} bear_mult={self.bear_mult:g}")
+
+
+def core_grid(fast: bool = False) -> List[CoreParams]:
+    vt = (0.10, 0.15) if fast else (0.10, 0.125, 0.15, 0.20)
+    lev = (1.0, 1.5)
+    vw = (20,) if fast else (20, 60)
+    sma = (200,) if fast else (150, 200)
+    bm = (0.0, 0.5)
+    return [CoreParams(vol_target=a, lev_cap=b, vol_window=c, sma_window=d, bear_mult=e)
+            for a, b, c, d, e in itertools.product(vt, lev, vw, sma, bm)]
+
+
+def build_core_indicators(u: Universe, grid: Sequence[CoreParams]) -> Dict[str, Dict[int, np.ndarray]]:
+    spy = pd.Series(u.close[:, u.spy_idx], index=u.dates)
+    lr = np.log(spy).diff()
+    return {"vol": {w: (lr.rolling(w).std() * math.sqrt(TRADING_DAYS)).to_numpy() for w in {p.vol_window for p in grid}},
+            "sma": {w: spy.rolling(w).mean().to_numpy() for w in {p.sma_window for p in grid}}}
+
+
+def run_core(u: Universe, cind: Dict[str, Dict[int, np.ndarray]], p: CoreParams, start: int, end: int,
+             decision_days: np.ndarray, cost_bps: float = 5.0) -> Tuple[pd.Series, pd.Series]:
+    """Vol-managed SPY exposure, decided at close t, executed at close t+1.
+
+    Daily return = e * r_spy + (1 - e) * r_cash - max(e - 1, 0) * spread / 252 - cost * |de|.
+    With e > 1 the (1 - e) term is negative, i.e. the excess exposure is financed at the
+    cash rate plus `borrow_spread`.  Below 1 the idle balance earns the cash rate.
+    """
+    vol = cind["vol"][p.vol_window]
+    sma = cind["sma"][p.sma_window]
+    spy_r = u.ret[:, u.spy_idx]
+    close = u.close[:, u.spy_idx]
+    cost = cost_bps * 1e-4
+    e = 1.0                                 # start fully invested (the buy-and-hold prior)
+    pending: Optional[float] = None
+    T = end - start
+    out = np.zeros(T)
+    expo = np.zeros(T)
+    for k, t in enumerate(range(start, end)):
+        r = e * spy_r[t] + (1.0 - e) * u.cash_ret[t] - max(e - 1.0, 0.0) * p.borrow_spread / TRADING_DAYS
+        if pending is not None:
+            r -= abs(pending - e) * cost
+            e = pending
+            pending = None
+        out[k] = r
+        expo[k] = e
+        if decision_days[t] and np.isfinite(vol[t]) and np.isfinite(sma[t]):
+            target = min(p.lev_cap, p.vol_target / max(vol[t], 1e-4))
+            if close[t] < sma[t]:
+                target *= p.bear_mult
+            if abs(target - e) > p.band or (target == 0.0 and e > 0.0):
+                pending = target
+    idx = u.dates[start:end]
+    return pd.Series(out, index=idx, name="core"), pd.Series(expo, index=idx, name="exposure")
+
+
+def core_grid_search(u: Universe, cind, grid: Sequence[CoreParams], start: int, end: int,
+                     decision_days: np.ndarray, cost_bps: float, objective: str) -> Tuple[pd.DataFrame, CoreParams]:
+    rows = []
+    rf = u.cash_ret[start:end]
+    for p in grid:
+        r, ex = run_core(u, cind, p, start, end, decision_days, cost_bps)
+        rr = r.to_numpy()
+        eq = np.cumprod(1 + rr)
+        rows.append({**asdict(p), "objective": fast_objective(rr, rf, objective), "sharpe": fast_sharpe(rr, rf),
+                     "cagr": eq[-1] ** (TRADING_DAYS / len(rr)) - 1,
+                     "max_drawdown": float(np.min(eq / np.maximum.accumulate(eq) - 1)),
+                     "avg_exposure": float(ex.mean()), "max_exposure": float(ex.max())})
+    tab = pd.DataFrame(rows).sort_values("objective", ascending=False).reset_index(drop=True)
+    b = tab.iloc[0]
+    best = CoreParams(vol_target=float(b["vol_target"]), lev_cap=float(b["lev_cap"]), vol_window=int(b["vol_window"]),
+                      sma_window=int(b["sma_window"]), bear_mult=float(b["bear_mult"]),
+                      borrow_spread=float(b["borrow_spread"]), band=float(b["band"]))
+    return tab, best
+
+
+# ----------------------------------------------------------------------------
 # PERFORMANCE STATISTICS
 # ----------------------------------------------------------------------------
 
@@ -1139,6 +1236,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--objective", default="sharpe", choices=["sharpe", "sortino", "calmar"])
     ap.add_argument("--train-frac", type=float, default=0.70)
     ap.add_argument("--satellite-weight", type=float, default=0.30, help="satellite share in the core+satellite blend")
+    ap.add_argument("--core", default="buyhold", choices=["buyhold", "volmanaged"],
+                    help="core sleeve for the blend: SPY buy & hold, or a vol-managed, trend-gated SPY core "
+                         "with a leverage cap and explicit financing (optimised on TRAIN only)")
+    ap.add_argument("--borrow-spread", type=float, default=0.005, help="annual financing spread over cash for exposure > 1")
     ap.add_argument("--wfo", action="store_true", help="also run rolling walk-forward optimisation")
     ap.add_argument("--wfo-train-years", type=float, default=6.0)
     ap.add_argument("--wfo-test-years", type=float, default=2.0)
@@ -1258,6 +1359,59 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("Sharpe/Sortino are computed on returns in EXCESS of the cash proxy; recovery_days = trading days from\n"
           "the max-drawdown trough to the next equity high ('not yet' if still under water).")
     tab_oos.to_csv(out_dir / "summary_oos.csv")
+
+    core_oos = None
+    if args.core == "volmanaged":
+        banner("STAGE E  VOLATILITY-MANAGED, TREND-GATED CORE  (optimised on TRAIN, tested OOS)")
+        cgrid = [replace(c, borrow_spread=args.borrow_spread) for c in core_grid(fast=args.fast)]
+        cind = build_core_indicators(u, cgrid)
+        ctab, cbest = core_grid_search(u, cind, cgrid, 0, split, decision_days, args.cost_bps, args.objective)
+        print(f"Core grid : {len(cgrid)} parameter sets | selected: {cbest.label()} | financing spread "
+              f"{args.borrow_spread:.2%} over cash on exposure > 1")
+        ccols = ["vol_target", "lev_cap", "vol_window", "sma_window", "bear_mult", "objective", "sharpe", "cagr",
+                 "max_drawdown", "avg_exposure", "max_exposure"]
+        print(ctab[ccols].head(8).to_string(index=False, float_format=lambda v: f"{v:,.3f}"))
+        core_oos, core_expo = run_core(u, cind, cbest, split, len(u.dates), decision_days, args.cost_bps)
+        core_oos = core_oos.rename("Vol-managed SPY core (OOS)")
+        series_core = {
+            "SPY buy & hold": spy.loc[oos],
+            "Vol-managed SPY core (OOS)": core_oos,
+            "Satellite (OOS)": sat_oos,
+            f"VM core {1 - blend_w:.0%} + {blend_w:.0%} Satellite (monthly)":
+                rebalanced_mix(pd.concat([core_oos, sat_oos], axis=1), [1 - blend_w, blend_w]),
+            f"VM core 100% + {blend_w:.0%} Satellite overlay (levered)":
+                (core_oos + blend_w * (sat_oos - rf.loc[oos])).rename("overlay"),
+        }
+        print()
+        print(format_table(performance_table(series_core, rf, "SPY buy & hold")))
+        print(f"\nCore OOS exposure: mean {core_expo.mean():.2f}x, max {core_expo.max():.2f}x, "
+              f"share of days below 1.0x {(core_expo < 1 - 1e-9).mean():.0%}, share levered {(core_expo > 1 + 1e-9).mean():.0%}")
+        print("The 'overlay' row funds the satellite with borrowed cash on top of a fully invested core, i.e. gross\n"
+              "exposure above 100%: it is the levered institutional construction, not an unlevered portfolio.")
+        ctab.to_csv(out_dir / "core_grid_results_train.csv", index=False)
+        pd.DataFrame({k: (1 + v).cumprod() for k, v in series_core.items()}).to_csv(out_dir / "core_oos_equity_curves.csv")
+        core_expo.to_csv(out_dir / "core_oos_exposure.csv")
+        if args.wfo:
+            # rolling WFO for the core with the same fold geometry as the satellite
+            T_ = len(u.dates)
+            train_n, test_n = int(args.wfo_train_years * TRADING_DAYS), int(args.wfo_test_years * TRADING_DAYS)
+            st, parts, frows = 260, [], []
+            while st + train_n + 1 < T_:
+                tr0, tr1 = st, st + train_n
+                te0, te1 = tr1, min(tr1 + test_n, T_)
+                _, cb = core_grid_search(u, cind, cgrid, tr0, tr1, decision_days, args.cost_bps, args.objective)
+                r_, _ = run_core(u, cind, cb, te0, te1, decision_days, args.cost_bps)
+                parts.append(r_)
+                frows.append({"test_start": u.dates[te0].date(), "test_end": u.dates[te1 - 1].date(), **asdict(cb),
+                              "oos_sharpe": fast_sharpe(r_.to_numpy(), u.cash_ret[te0:te1])})
+                st += test_n
+            core_wfo = pd.concat(parts).rename("Vol-managed SPY core (WFO stitched)")
+            print("\nCore rolling walk-forward (same folds as the satellite):")
+            print(pd.DataFrame(frows)[["test_start", "test_end", "vol_target", "lev_cap", "vol_window", "sma_window",
+                                       "bear_mult", "oos_sharpe"]].to_string(index=False, float_format=lambda v: f"{v:,.3f}"))
+            series_cw = {"SPY buy & hold": spy.reindex(core_wfo.index), "Vol-managed SPY core (WFO stitched)": core_wfo}
+            print(format_table(performance_table(series_cw, rf, "SPY buy & hold")))
+            pd.DataFrame(frows).to_csv(out_dir / "core_wfo_folds.csv", index=False)
 
     banner("STAGE D  IN-SAMPLE (TRAIN) RESULTS - for reference only; parameters were fitted here")
     series_is = {"SPY buy & hold": spy.iloc[:split], "Satellite (train)": train_res.returns.rename("Satellite (train)")}
