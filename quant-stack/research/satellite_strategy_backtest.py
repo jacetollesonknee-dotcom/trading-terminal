@@ -56,6 +56,7 @@ Anti-overfitting
 Usage
 -----
     python satellite_strategy_backtest.py                 # 70/30 holdout, live Yahoo data
+    python satellite_strategy_backtest.py --risk-assets SPY TLT GLD DBC UUP   # wider universe
     python satellite_strategy_backtest.py --wfo           # + rolling walk-forward
     python satellite_strategy_backtest.py --synthetic     # offline smoke test (fake data!)
     python satellite_strategy_backtest.py --fast          # reduced grid, quick run
@@ -98,6 +99,10 @@ EULER_GAMMA = 0.5772156649015329
 # ----------------------------------------------------------------------------
 
 RISK_ASSETS: Tuple[str, ...] = ("SPY", "TLT", "GLD")   # equities, long bonds, gold
+CORE_ASSETS: Tuple[str, ...] = ("SPY", "TLT", "GLD")   # must exist; history starts when all of these trade
+# Optional extension (--risk-assets SPY TLT GLD DBC UUP): assets that list later than the
+# core are simply ineligible until they have data, so the 2005+ history is kept.
+EXTENDED_ASSETS: Tuple[str, ...] = ("SPY", "TLT", "GLD", "DBC", "UUP")   # + commodities, US dollar
 CASH_PROXIES: Tuple[str, ...] = ("BIL", "SHY")          # BIL preferred; SHY fills pre-2007
 BENCHMARK = "SPY"
 
@@ -287,6 +292,7 @@ def synthetic_prices(start: str, end: str, seed: int = 7) -> Dict[str, pd.DataFr
     close = 100.0 * np.exp(np.cumsum(r, axis=0))
     names = ["SPY", "TLT", "GLD", "BIL", "SHY"]
     out = {}
+    extra = {"DBC": ("2006-02-06", 0.02), "UUP": ("2007-03-01", -0.03)}
     for j, name in enumerate(names):
         c = close[:, j]
         o = np.r_[c[0], c[:-1]] * (1 + 0.002 * rng.standard_normal(T) * (sg[regime, j] / 0.15))
@@ -297,6 +303,12 @@ def synthetic_prices(start: str, end: str, seed: int = 7) -> Dict[str, pd.DataFr
         if name == "BIL":
             df = df[df.index >= "2007-05-30"]
         out[name] = df
+    for name, (listing, drift) in extra.items():     # late-listing optional assets
+        z2 = rng.standard_normal(T)
+        rr = drift * dt + 0.18 * np.sqrt(dt) * (0.6 * z2 - 0.4 * z[:, 0])
+        c = 25.0 * np.exp(np.cumsum(rr))
+        df = pd.DataFrame({"Open": c, "High": c * 1.004, "Low": c * 0.996, "Close": c}, index=idx)
+        out[name] = df[df.index >= listing]
     return out
 
 
@@ -325,12 +337,15 @@ def align_universe(prices: Dict[str, pd.DataFrame], risk_assets: Sequence[str],
     * Cash proxy: BIL daily returns, with SHY returns filling dates before BIL
       existed, and 0 % where neither exists.
     """
-    missing = [t for t in risk_assets if t not in prices]
+    required = [t for t in risk_assets if t in CORE_ASSETS or t == benchmark]
+    missing = [t for t in required if t not in prices]
     if missing:
         raise RuntimeError(f"required risk assets unavailable: {missing}. "
                            "Check tickers / network, or run with --synthetic.")
-    if benchmark not in prices:
-        raise RuntimeError(f"benchmark {benchmark} unavailable")
+    dropped = [t for t in risk_assets if t not in prices]
+    if dropped:
+        LOG.warning("optional risk assets unavailable and dropped: %s", dropped)
+    risk_assets = [t for t in risk_assets if t in prices]
     calendar = prices[benchmark].index
     fields = {}
     for f in ("Close", "High", "Low"):
@@ -341,10 +356,14 @@ def align_universe(prices: Dict[str, pd.DataFrame], risk_assets: Sequence[str],
         if filled:
             LOG.info("forward-filled %d %s cells", filled, f)
         fields[f] = frame
-    first_valid = max(fields["Close"][t].first_valid_index() for t in risk_assets)
+    first_valid = max(fields["Close"][t].first_valid_index() for t in required)
     for f in fields:
         fields[f] = fields[f].loc[first_valid:]
     dates = fields["Close"].index
+    for t in risk_assets:
+        fv = fields["Close"][t].first_valid_index()
+        if fv > first_valid:
+            LOG.info("%s lists %s; ineligible before then", t, fv.date())
     # --- cash proxy splice ---------------------------------------------------
     cash = pd.Series(0.0, index=dates)
     have = np.zeros(len(dates), dtype=bool)
@@ -363,7 +382,9 @@ def align_universe(prices: Dict[str, pd.DataFrame], risk_assets: Sequence[str],
     cash_label = " + ".join(used) if used else "none (0%)"
     LOG.info("cash proxy splice -> %s", cash_label)
     close = fields["Close"].to_numpy(dtype=float)
-    ret = np.vstack([np.zeros((1, close.shape[1])), close[1:] / close[:-1] - 1.0])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ret = np.vstack([np.zeros((1, close.shape[1])), close[1:] / close[:-1] - 1.0])
+    ret = np.nan_to_num(ret, nan=0.0)      # pre-listing: no price, no position, zero return
     return Universe(dates=dates, tickers=list(risk_assets), close=close,
                     high=fields["High"].to_numpy(dtype=float),
                     low=fields["Low"].to_numpy(dtype=float), ret=ret,
@@ -486,21 +507,24 @@ def _target_weights(t: int, p: StrategyParams, u: Universe, ind: Indicators,
     sma_t = ind.sma[p.sma_window][t]
     vol_t = ind.vol[p.vol_window][t]
     c = u.close[t]
-    if not (np.isfinite(mom_t).all() and np.isfinite(sma_t).all()
-            and np.isfinite(vol_t).all() and np.isfinite(cm)):
+    ok = np.isfinite(mom_t) & np.isfinite(sma_t) & np.isfinite(vol_t) & np.isfinite(c)
+    if not (np.isfinite(cm) and ok[u.spy_idx]):
         return np.zeros(n)                       # warm-up: stay in cash
-    excess = mom_t - cm                           # absolute momentum vs cash
+    with np.errstate(invalid="ignore"):
+        excess = np.where(ok, mom_t - cm, -np.inf)   # absolute momentum vs cash; NaN -> never eligible
     cap = _regime_cap(t, p, u, ind)
     # --- eligibility and relative ranking -------------------------------------
     # Turtle logic: the breakout confirmation gates NEW entries only; a held name is
     # kept until it fails momentum, the SMA, the fast channel, or its rank buffer.
-    hold_ok = (excess > 0) & (c > sma_t)
-    if p.dc_fast > 0:                             # fresh breakdown -> neither hold nor enter
-        hold_ok &= ~(c < ind.dc_low[p.dc_fast][t])
-    enter_ok = hold_ok.copy()
-    if p.dc_slow > 0:                             # entry needs close near the slow-channel high
-        tol = p.breakout_atr_tol * ind.atr[p.atr_window][t]
-        enter_ok &= c >= ind.dc_high[p.dc_slow][t] - tol      # NaN -> False (warm-up)
+    with np.errstate(invalid="ignore"):
+        hold_ok = ok & (excess > 0) & (c > sma_t)
+    with np.errstate(invalid="ignore"):
+        if p.dc_fast > 0:                         # fresh breakdown -> neither hold nor enter
+            hold_ok &= ~(c < ind.dc_low[p.dc_fast][t])
+        enter_ok = hold_ok.copy()
+        if p.dc_slow > 0:                         # entry needs close near the slow-channel high
+            tol = p.breakout_atr_tol * ind.atr[p.atr_window][t]
+            enter_ok &= c >= ind.dc_high[p.dc_slow][t] - tol  # NaN -> False (warm-up)
     w = np.zeros(n)
     if cap <= 0 or not hold_ok.any():
         return w
@@ -566,7 +590,7 @@ def run_engine(u: Universe, ind: Indicators, p: StrategyParams, start: int, end:
             pending = None
         held = w > 0
         if held.any():
-            peak[held] = np.fmax(peak[held], u.close[t, held])
+            peak[held] = np.fmax(peak[held], u.close[t, held])   # fmax ignores NaN
         port[k] = rp
         gross[k] = w.sum()
         wts[k] = w
@@ -590,11 +614,13 @@ def run_engine(u: Universe, ind: Indicators, p: StrategyParams, start: int, end:
             trig = np.zeros(n, dtype=bool)
             if p.stop_atr_mult > 0:
                 a = atr[t]
-                st = held & np.isfinite(a) & (u.close[t] < peak - p.stop_atr_mult * a)
+                with np.errstate(invalid="ignore"):
+                    st = held & np.isfinite(a) & (u.close[t] < peak - p.stop_atr_mult * a)
                 n_stops += int(st.sum())
                 trig |= st
             if dc_low is not None:
-                dc = held & (u.close[t] < dc_low[t])          # NaN -> False
+                with np.errstate(invalid="ignore"):
+                    dc = held & (u.close[t] < dc_low[t])      # NaN -> False
                 n_dc += int((dc & ~trig).sum())
                 trig |= dc
             if trig.any():
