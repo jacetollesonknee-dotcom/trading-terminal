@@ -53,9 +53,18 @@ Anti-overfitting
 * Optional `--wfo` runs a rolling walk-forward (re-optimise every `step` years) and
   stitches the OOS folds into one continuous equity curve.
 
+Two signal engines share the same risk layer and validation harness:
+  --strategy dual      single-lookback dual momentum on SPY/TLT/GLD (above)
+  --strategy ensemble  8 sleeves (SPY EFA EEM VNQ TLT IEF GLD DBC); trend score = share of five
+                       votes (1/3/6/12-month excess momentum > 0, close > SMA); ranking by Keller's
+                       13612W composite; weights = score / EWMA vol, scaled to the vol target with
+                       the full EWMA covariance (diversification buys gross exposure, never leverage);
+                       regime cap from market breadth instead of SPY alone.
+
 Usage
 -----
     python satellite_strategy_backtest.py                 # 70/30 holdout, live Yahoo data
+    python satellite_strategy_backtest.py --strategy ensemble --wfo
     python satellite_strategy_backtest.py --risk-assets SPY TLT GLD DBC UUP   # wider universe
     python satellite_strategy_backtest.py --wfo           # + rolling walk-forward
     python satellite_strategy_backtest.py --synthetic     # offline smoke test (fake data!)
@@ -103,6 +112,10 @@ CORE_ASSETS: Tuple[str, ...] = ("SPY", "TLT", "GLD")   # must exist; history sta
 # Optional extension (--risk-assets SPY TLT GLD DBC UUP): assets that list later than the
 # core are simply ineligible until they have data, so the 2005+ history is kept.
 EXTENDED_ASSETS: Tuple[str, ...] = ("SPY", "TLT", "GLD", "DBC", "UUP")   # + commodities, US dollar
+# Default universe for --strategy ensemble: eight liquid sleeves with distinct risk premia.
+ENSEMBLE_ASSETS: Tuple[str, ...] = ("SPY", "EFA", "EEM", "VNQ", "TLT", "IEF", "GLD", "DBC")
+ENSEMBLE_LOOKBACKS: Tuple[int, ...] = (21, 63, 126, 252)   # 1/3/6/12 months
+ENSEMBLE_WEIGHTS: Tuple[int, ...] = (12, 4, 2, 1)           # Keller's 13612W composite
 CASH_PROXIES: Tuple[str, ...] = ("BIL", "SHY")          # BIL preferred; SHY fills pre-2007
 BENCHMARK = "SPY"
 
@@ -120,6 +133,9 @@ CRISIS_WINDOWS: Dict[str, Tuple[str, str]] = {
 class StrategyParams:
     """All knobs of the satellite strategy.  Frozen so it can be a dict key."""
 
+    signal: str = "dual"          # "dual" (single-lookback dual momentum) or "ensemble"
+    min_score: float = 0.6        # ensemble: score needed to HOLD (entry needs one more vote)
+    cov_span: int = 60            # ensemble: EWMA span for the covariance / vol estimate
     mom_lookback: int = 126       # momentum lookback (trading days)
     sma_window: int = 200         # trend / regime filter window (trading days)
     top_k: int = 2                # max simultaneous risk positions
@@ -137,13 +153,26 @@ class StrategyParams:
     atr_window: int = 14          # ATR window for stops
 
     def label(self) -> str:
-        return (f"L={self.mom_lookback} SMA={self.sma_window} K={self.top_k} "
+        sig = (f"ensemble(min_score={self.min_score:g})" if self.signal == "ensemble"
+               else f"dual(L={self.mom_lookback})")
+        return (f"{sig} SMA={self.sma_window} K={self.top_k} "
                 f"stop={self.stop_atr_mult:g}ATR DC={self.dc_fast}/{self.dc_slow} "
                 f"crisis_cap={self.crisis_cap:g}")
 
 
-def default_grid(fast: bool = False) -> List[StrategyParams]:
+def default_grid(fast: bool = False, signal: str = "dual") -> List[StrategyParams]:
     """Parameter grid searched on the TRAIN segment only."""
+    if signal == "ensemble":
+        # Deliberately small: the ensemble averages over lookbacks, so there is no
+        # lookback to tune and fewer trials means less selection bias.
+        sma = (150, 200) if fast else (100, 150, 200, 250)
+        min_score = (0.6, 0.8)
+        top_k = (3,) if fast else (2, 3, 4)
+        crisis = (0.0, 0.5)
+        dc = ((0, 0), (20, 55))
+        return [StrategyParams(signal="ensemble", mom_lookback=126, sma_window=s, min_score=ms, top_k=k,
+                               stop_atr_mult=0.0, crisis_cap=c, dc_fast=f, dc_slow=sl, max_weight=0.5)
+                for s, ms, k, c, (f, sl) in itertools.product(sma, min_score, top_k, crisis, dc)]
     if fast:
         mom = (126, 252)
         sma = (150, 200)
@@ -292,7 +321,8 @@ def synthetic_prices(start: str, end: str, seed: int = 7) -> Dict[str, pd.DataFr
     close = 100.0 * np.exp(np.cumsum(r, axis=0))
     names = ["SPY", "TLT", "GLD", "BIL", "SHY"]
     out = {}
-    extra = {"DBC": ("2006-02-06", 0.02), "UUP": ("2007-03-01", -0.03)}
+    extra = {"DBC": ("2006-02-06", 0.02), "UUP": ("2007-03-01", -0.03), "EFA": ("2005-01-03", 0.05),
+             "EEM": ("2005-01-03", 0.06), "VNQ": ("2005-01-03", 0.06), "IEF": ("2005-01-03", 0.03)}
     for j, name in enumerate(names):
         c = close[:, j]
         o = np.r_[c[0], c[:-1]] * (1 + 0.002 * rng.standard_normal(T) * (sg[regime, j] / 0.15))
@@ -405,6 +435,9 @@ class Indicators:
     atr: Dict[int, np.ndarray]        # window -> (T x N) Wilder ATR in price units
     dc_high: Dict[int, np.ndarray]    # window -> (T x N) highest high of the PRIOR n days
     dc_low: Dict[int, np.ndarray]     # window -> (T x N) lowest low of the PRIOR n days
+    ens_votes: Optional[np.ndarray] = None   # (T x N) count of positive excess-momentum lookbacks (0..4)
+    composite: Optional[np.ndarray] = None   # (T x N) 13612W composite excess momentum
+    ewm_cov: Dict[int, np.ndarray] = None    # span -> (T x N x N) annualised EWMA covariance
 
 
 def build_indicators(u: Universe, grid: Iterable[StrategyParams]) -> Indicators:
@@ -437,8 +470,23 @@ def build_indicators(u: Universe, grid: Iterable[StrategyParams]) -> Indicators:
     dc_windows = {n for p in grid for n in (p.dc_fast, p.dc_slow) if n > 0}
     dc_high = {n: high.rolling(n).max().shift(1).to_numpy() for n in dc_windows}
     dc_low = {n: low.rolling(n).min().shift(1).to_numpy() for n in dc_windows}
+    ens_votes = composite = None
+    ewm_cov: Dict[int, np.ndarray] = {}
+    if any(p.signal == "ensemble" for p in grid):
+        exc = {}
+        for L in ENSEMBLE_LOOKBACKS:
+            exc[L] = (close / close.shift(L) - 1.0).sub(np.expm1(cash_log.rolling(L).sum()), axis=0)
+        composite = sum(wt * exc[L] for L, wt in zip(ENSEMBLE_LOOKBACKS, ENSEMBLE_WEIGHTS)) / sum(ENSEMBLE_WEIGHTS)
+        votes = sum((exc[L] > 0).astype(float) for L in ENSEMBLE_LOOKBACKS)
+        votes = votes.where(composite.notna())           # NaN until every lookback is available
+        ens_votes, composite = votes.to_numpy(), composite.to_numpy()
+        n = len(u.tickers)
+        for span in {p.cov_span for p in grid if p.signal == "ensemble"}:
+            cov = logret.ewm(span=span, min_periods=span).cov()
+            ewm_cov[span] = cov.to_numpy().reshape(len(u.dates), n, n) * TRADING_DAYS
     return Indicators(sma=sma, mom=mom, cash_mom=cash_mom, vol=vol, atr=atr,
-                      dc_high=dc_high, dc_low=dc_low)
+                      dc_high=dc_high, dc_low=dc_low, ens_votes=ens_votes, composite=composite,
+                      ewm_cov=ewm_cov)
 
 
 def rebalance_mask(dates: pd.DatetimeIndex, freq: str = "W") -> np.ndarray:
@@ -472,11 +520,93 @@ class EngineResult:
     n_derisk: int               # intra-week regime de-risking events
 
 
-def _regime_cap(t: int, p: StrategyParams, u: Universe, ind: Indicators) -> float:
-    """Gross risk cap implied by the SPY regime at close t (SMA + momentum + Donchian).
+def _ensemble_scores(t: int, p: StrategyParams, u: Universe, ind: Indicators) -> Tuple[np.ndarray, np.ndarray]:
+    """(ok mask, trend score in [0, 1]) for the ensemble signal at close t."""
+    c = u.close[t]
+    votes = ind.ens_votes[t]
+    sma_t = ind.sma[p.sma_window][t]
+    ok = np.isfinite(votes) & np.isfinite(sma_t) & np.isfinite(c)
+    with np.errstate(invalid="ignore"):
+        score = np.where(ok, (np.nan_to_num(votes) + (c > sma_t)) / (len(ENSEMBLE_LOOKBACKS) + 1.0), 0.0)
+    return ok, score
 
+
+def _breadth_cap(t: int, p: StrategyParams, u: Universe, ind: Indicators) -> float:
+    """Ensemble regime: gross cap from market breadth (share of sleeves in an uptrend)."""
+    ok, score = _ensemble_scores(t, p, u, ind)
+    if not ok.any() or not ok[u.spy_idx]:
+        return 1.0
+    b = float((score[ok] >= p.min_score).mean())
+    i = u.spy_idx
+    c = u.close[t, i]
+    with np.errstate(invalid="ignore"):
+        if p.dc_slow > 0 and c < ind.dc_low[p.dc_slow][t, i]:
+            return p.crisis_cap
+        cap = 1.0 if b >= 0.5 else (p.bear_cap if b >= 0.25 else p.crisis_cap)
+        if p.dc_fast > 0 and c < ind.dc_low[p.dc_fast][t, i]:
+            cap = min(cap, p.bear_cap)
+    return cap
+
+
+def _target_weights_ensemble(t: int, p: StrategyParams, u: Universe, ind: Indicators,
+                             current: Optional[np.ndarray]) -> np.ndarray:
+    """Ensemble trend score + 13612W ranking + covariance-aware vol targeting."""
+    n = len(u.tickers)
+    ok, score = _ensemble_scores(t, p, u, ind)
+    cov = ind.ewm_cov[p.cov_span][t]
+    ok &= np.isfinite(np.diagonal(cov))
+    w = np.zeros(n)
+    if not ok[u.spy_idx]:
+        return w
+    c = u.close[t]
+    comp = np.where(ok, np.nan_to_num(ind.composite[t], nan=-np.inf), -np.inf)
+    cap = _breadth_cap(t, p, u, ind)
+    step = 1.0 / (len(ENSEMBLE_LOOKBACKS) + 1.0)           # one vote
+    with np.errstate(invalid="ignore"):
+        hold_ok = ok & (score >= p.min_score - 1e-9)
+        if p.dc_fast > 0:
+            hold_ok &= ~(c < ind.dc_low[p.dc_fast][t])
+        # hysteresis: a NEW entry needs one more vote than it takes to stay in
+        enter_ok = hold_ok & (score >= min(1.0, p.min_score + step) - 1e-9)
+        if p.dc_slow > 0:
+            tol = p.breakout_atr_tol * ind.atr[p.atr_window][t]
+            enter_ok &= c >= ind.dc_high[p.dc_slow][t] - tol
+    if cap <= 0 or not hold_ok.any():
+        return w
+    order = np.argsort(-comp, kind="stable")
+    rank = np.empty(n, dtype=int)
+    rank[order] = np.arange(n)
+    chosen: List[int] = []
+    if current is not None:
+        chosen = [i for i in order if current[i] > 0 and hold_ok[i]
+                  and rank[i] < p.top_k + p.rank_buffer][:p.top_k]
+    for i in order:
+        if len(chosen) >= p.top_k:
+            break
+        if enter_ok[i] and i not in chosen:
+            chosen.append(i)
+    if not chosen:
+        return w
+    idx = np.array(chosen)
+    vol_i = np.sqrt(np.diagonal(cov)[idx])
+    raw = score[idx] / np.maximum(vol_i, 1e-4)            # conviction over risk
+    raw = raw / raw.sum()                                 # fully-invested basket shape
+    sub = cov[np.ix_(idx, idx)]
+    sigma_p = math.sqrt(max(float(raw @ sub @ raw), 1e-10))
+    scale = min(cap, p.vol_target / sigma_p)              # no leverage: scale <= cap <= 1
+    w[idx] = np.minimum(raw * scale, p.max_weight)
+    return w
+
+
+def _regime_cap(t: int, p: StrategyParams, u: Universe, ind: Indicators) -> float:
+    """Gross risk cap implied by the regime at close t.
+
+    dual     : SPY SMA + absolute momentum + Donchian triggers
+    ensemble : market breadth + SPY Donchian triggers
     Returns 1.0 during warm-up so the cap never forces trades before signals exist.
     """
+    if p.signal == "ensemble":
+        return _breadth_cap(t, p, u, ind)
     i = u.spy_idx
     c = u.close[t, i]
     sma_v = ind.sma[p.sma_window][t, i]
@@ -501,6 +631,8 @@ def _target_weights(t: int, p: StrategyParams, u: Universe, ind: Indicators,
     retained while it ranks within top_k + rank_buffer, so the book does not churn when two
     assets swap places at the margin.  New entries fill only the remaining slots.
     """
+    if p.signal == "ensemble":
+        return _target_weights_ensemble(t, p, u, ind, current)
     n = len(u.tickers)
     mom_t = ind.mom[p.mom_lookback][t]
     cm = ind.cash_mom[p.mom_lookback][t]
@@ -597,8 +729,12 @@ def run_engine(u: Universe, ind: Indicators, p: StrategyParams, start: int, end:
         if decision_days[t]:
             target = _target_weights(t, p, u, ind, current=w)
             if p.rebalance_band > 0:          # no-trade band on names already held and still wanted
+                intended = target.sum()
                 keep = held & (target > 0) & (np.abs(target - w) <= p.rebalance_band)
                 target[keep] = w[keep]
+                tot = target.sum()
+                if tot > max(intended, 1e-12) and tot > 1e-12:   # keep gross at the intended total
+                    target *= intended / tot
             pending = target
             n_rebal += 1
         else:
@@ -836,9 +972,9 @@ def grid_search(u: Universe, ind: Indicators, grid: Sequence[StrategyParams], st
     # --- neighbourhood smoothing ------------------------------------------------
     moms = sorted(tab["mom_lookback"].unique())
     smas = sorted(tab["sma_window"].unique())
-    other = [c for c in ("top_k", "stop_atr_mult", "dc_fast", "dc_slow", "breakout_atr_tol", "crisis_cap",
-                         "vol_target", "bear_cap", "max_weight", "rebalance_band", "rank_buffer", "vol_window",
-                         "atr_window") if c in tab.columns]
+    other = [c for c in ("signal", "min_score", "cov_span", "top_k", "stop_atr_mult", "dc_fast", "dc_slow",
+                         "breakout_atr_tol", "crisis_cap", "vol_target", "bear_cap", "max_weight",
+                         "rebalance_band", "rank_buffer", "vol_window", "atr_window") if c in tab.columns]
     key = tab.set_index(["mom_lookback", "sma_window"] + other)["objective"].to_dict()
     smoothed = []
     for _, row in tab.iterrows():
@@ -856,8 +992,10 @@ def grid_search(u: Universe, ind: Indicators, grid: Sequence[StrategyParams], st
     tab["smoothed_objective"] = smoothed
     tab = tab.sort_values("smoothed_objective", ascending=False).reset_index(drop=True)
     best_row = tab.iloc[0]
-    best = replace(grid[0], **{k: (int(best_row[k]) if isinstance(getattr(grid[0], k), int) else float(best_row[k]))
-                               for k in asdict(grid[0])})
+    def _cast(k):
+        v0 = getattr(grid[0], k)
+        return str(best_row[k]) if isinstance(v0, str) else (int(best_row[k]) if isinstance(v0, int) else float(best_row[k]))
+    best = replace(grid[0], **{k: _cast(k) for k in asdict(grid[0])})
     return GridResult(table=tab, best=best, best_smoothed_score=float(best_row["smoothed_objective"]))
 
 
@@ -983,14 +1121,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--start", default="2005-01-01")
     ap.add_argument("--end", default=pd.Timestamp.today().strftime("%Y-%m-%d"))
-    ap.add_argument("--risk-assets", nargs="+", default=list(RISK_ASSETS))
+    ap.add_argument("--strategy", default="dual", choices=["dual", "ensemble"],
+                    help="dual = single-lookback dual momentum (3-asset default); "
+                         "ensemble = multi-lookback trend score, breadth regime, covariance vol targeting (8-asset default)")
+    ap.add_argument("--risk-assets", nargs="+", default=None,
+                    help=f"default {list(RISK_ASSETS)} for dual, {list(ENSEMBLE_ASSETS)} for ensemble")
     ap.add_argument("--cash-proxies", nargs="+", default=list(CASH_PROXIES))
     ap.add_argument("--rebalance", default="W", choices=["D", "W", "M"], help="decision frequency")
     ap.add_argument("--cost-bps", type=float, default=5.0, help="one-way transaction cost (bps of turnover)")
     ap.add_argument("--vol-target", type=float, default=0.10)
     ap.add_argument("--bear-cap", type=float, default=0.75)
     ap.add_argument("--rebalance-band", type=float, default=0.05, help="no-trade band on held names (weight units)")
-    ap.add_argument("--max-weight", type=float, default=1.0, help="per-asset weight cap (e.g. 0.6 to avoid full concentration with K=1)")
+    ap.add_argument("--max-weight", type=float, default=None,
+                    help="per-asset weight cap (default 1.0 for dual, 0.5 for ensemble)")
     ap.add_argument("--breakout-atr-tol", type=float, default=1.0,
                     help="entry allowed if close >= slow Donchian high - tol*ATR (0 = exact breakout)")
     ap.add_argument("--objective", default="sharpe", choices=["sharpe", "sortino", "calmar"])
@@ -1010,6 +1153,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    if args.risk_assets is None:
+        args.risk_assets = list(ENSEMBLE_ASSETS if args.strategy == "ensemble" else RISK_ASSETS)
+    if args.max_weight is None:
+        args.max_weight = 0.5 if args.strategy == "ensemble" else 1.0
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     pd.set_option("display.width", 200)
@@ -1036,7 +1183,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # ---------------- STAGE B ----------------
     banner("STAGE B  SYSTEMATIC INDICATOR GENERATION")
-    grid = default_grid(fast=args.fast)
+    grid = default_grid(fast=args.fast, signal=args.strategy)
     grid = [replace(p, vol_target=args.vol_target, bear_cap=args.bear_cap, rebalance_band=args.rebalance_band,
                     breakout_atr_tol=args.breakout_atr_tol, max_weight=args.max_weight) for p in grid]
     ind = build_indicators(u, grid)
@@ -1058,7 +1205,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Test (OOS): {oos_start.date()} -> {u.dates[-1].date()}")
     print(f"Selected  : {best.label()}  (vol_target={best.vol_target:g}, bear_cap={best.bear_cap:g})")
     print("\nTop 10 parameter sets on TRAIN (ranked by neighbourhood-smoothed objective):")
-    show_cols = ["mom_lookback", "sma_window", "top_k", "stop_atr_mult", "dc_fast", "dc_slow", "crisis_cap",
+    show_cols = (["min_score"] if args.strategy == "ensemble" else ["mom_lookback"]) + \
+                ["sma_window", "top_k", "stop_atr_mult", "dc_fast", "dc_slow", "crisis_cap",
                  "objective", "smoothed_objective", "sharpe", "cagr", "max_drawdown", "turnover_py",
                  "n_stops", "n_dc_exits", "n_derisk", "avg_gross"]
     print(gs.table[show_cols].head(10).to_string(index=False, float_format=lambda v: f"{v:,.3f}"))
@@ -1143,8 +1291,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         wf = rolling_walk_forward(u, ind, grid, decision_days, args.cost_bps, args.objective,
                                   args.wfo_train_years, args.wfo_test_years)
         folds: pd.DataFrame = wf["folds"]
-        fold_cols = ["fold", "test_start", "test_end", "mom_lookback", "sma_window", "top_k", "stop_atr_mult",
-                     "dc_fast", "dc_slow", "crisis_cap", "is_objective", "oos_sharpe", "oos_return", "bench_oos_return"]
+        fold_cols = ["fold", "test_start", "test_end", "mom_lookback", "min_score", "sma_window", "top_k",
+                     "stop_atr_mult", "dc_fast", "dc_slow", "crisis_cap", "is_objective", "oos_sharpe",
+                     "oos_return", "bench_oos_return"]
         print(folds[fold_cols].to_string(index=False, float_format=lambda v: f"{v:,.3f}"))
         wfo_ret: pd.Series = wf["oos_returns"].rename("Satellite (WFO stitched)")
         series_wfo = {"SPY buy & hold": spy.reindex(wfo_ret.index), "Satellite (WFO stitched)": wfo_ret,
@@ -1153,8 +1302,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"\nStitched OOS period {wfo_ret.index[0].date()} -> {wfo_ret.index[-1].date()} "
               f"({len(folds)} folds, parameters re-fitted every {args.wfo_test_years:g} years)")
         print(format_table(performance_table(series_wfo, rf, "SPY buy & hold")))
-        stability = folds[["mom_lookback", "sma_window", "top_k", "stop_atr_mult", "dc_fast", "dc_slow",
-                           "crisis_cap"]].nunique()
+        stability = folds[["mom_lookback", "min_score", "sma_window", "top_k", "stop_atr_mult", "dc_fast",
+                           "dc_slow", "crisis_cap"]].nunique()
         print("\nParameter stability across folds (distinct values chosen): " + ", ".join(f"{k}={v}" for k, v in stability.items()))
         folds.to_csv(out_dir / "wfo_folds.csv", index=False)
         pd.DataFrame({k: (1 + v).cumprod() for k, v in series_wfo.items()}).to_csv(out_dir / "wfo_equity_curves.csv")
