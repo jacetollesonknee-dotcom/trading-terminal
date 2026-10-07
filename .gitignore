@@ -2,3 +2,5 @@
 schwab_token.json 
 __pycache__/ 
 *.pyc 
+data_cache/
+satellite_output/
