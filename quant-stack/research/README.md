@@ -6,8 +6,12 @@ runs on its own with the libraries named in its docstring.
 ## satellite_strategy_backtest.py
 
 Dual-momentum / trend-regime / vol-targeted "satellite" overlay for a buy-and-hold
-core, validated with a 70/30 chronological holdout and an optional rolling
-walk-forward optimisation. See the module docstring for the full design.
+core, with a multi-timeframe Donchian breakout layer (fast channel exits and
+daily regime de-risking, slow channel entry confirmation) so the book moves to
+cash within days of a trend collapse. Validated with a 70/30 chronological
+holdout and an optional rolling walk-forward optimisation; the OOS report
+includes an ablation row with the Donchian layer switched off. See the module
+docstring for the full design.
 
 ```bash
 pip install pandas numpy scipy yfinance            # matplotlib optional (chart)

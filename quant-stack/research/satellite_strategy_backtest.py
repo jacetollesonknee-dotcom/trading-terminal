@@ -21,13 +21,26 @@ Strategy (decision at close t, execution at close t+1, weekly cadence by default
 1. Absolute momentum   : asset L-day total return minus cash-proxy L-day return > 0
 2. Trend filter        : asset close > SMA(W) of its own close
 3. Relative momentum   : rank eligible assets by excess momentum, hold top-K
+                         (rank hysteresis: a held name stays while inside top-K+1)
 4. Volatility sizing   : w_i = vol_target / (K * sigma_i), sigma_i = 20d realised vol
                          (a no-trade band suppresses tiny weekly re-sizing trades)
-5. Regime cash buffer  : SPY > SMA(W)                  -> gross risk cap 100 %
+5. Donchian breakout   : multi-timeframe channel filter (checked DAILY, not just weekly)
+   (fast / slow)         - entry needs close within `breakout_atr_tol` ATR of the slow-channel
+                           high (trend confirmation, Turtle-style)
+                         - a close below the fast-channel low exits that position next close
+                         - SPY below its fast-channel low   -> gross cap tightened to `bear_cap`
+                         - SPY below its slow-channel low   -> gross cap cut to `crisis_cap`
+                         - whenever gross exposure exceeds the cap it is cut the next close
+6. Regime cash buffer  : SPY > SMA(W)                  -> gross risk cap 100 %
                          SPY < SMA(W), SPY abs-mom > 0 -> gross risk cap `bear_cap`
                          SPY < SMA(W), SPY abs-mom < 0 -> gross risk cap `crisis_cap`
-6. Trailing stop       : exit a position when close < (peak close since entry - k * ATR14)
-7. Idle capital earns the cash-proxy return (BIL, spliced with SHY before BIL's listing).
+                         (the Donchian triggers above override toward the tighter cap)
+7. Trailing stop       : exit a position when close < (peak close since entry - k * ATR14)
+8. Idle capital earns the cash-proxy return (BIL, spliced with SHY before BIL's listing).
+
+The Donchian layer is the "fast exit": the 200-day SMA regime filter needs weeks to turn,
+whereas a 20-day low is breached within days of a trend collapse. The OOS report includes
+an ablation row with the Donchian layer disabled so its contribution is visible.
 
 Anti-overfitting
 ----------------
@@ -107,16 +120,21 @@ class StrategyParams:
     top_k: int = 2                # max simultaneous risk positions
     vol_target: float = 0.10      # annualised portfolio volatility target
     stop_atr_mult: float = 3.0    # trailing stop distance in ATR units (<= 0 disables)
+    dc_fast: int = 20             # fast Donchian channel: position exit + SPY bear trigger (0 disables)
+    dc_slow: int = 55             # slow Donchian channel: entry confirmation + SPY crisis trigger (0 disables)
+    breakout_atr_tol: float = 1.0 # entry allowed if close >= slow-channel high - tol * ATR
     bear_cap: float = 0.75        # gross risk cap when SPY < SMA but SPY abs-mom > 0
     crisis_cap: float = 0.0       # gross risk cap when SPY < SMA and SPY abs-mom < 0
     max_weight: float = 1.0       # per-asset weight cap
     rebalance_band: float = 0.05  # no-trade band: ignore |target - current| below this (held names only)
+    rank_buffer: int = 1          # rank hysteresis: a held name is kept while ranked within top_k + buffer
     vol_window: int = 20          # realised-vol window for sizing
     atr_window: int = 14          # ATR window for stops
 
     def label(self) -> str:
         return (f"L={self.mom_lookback} SMA={self.sma_window} K={self.top_k} "
-                f"stop={self.stop_atr_mult:g}ATR crisis_cap={self.crisis_cap:g}")
+                f"stop={self.stop_atr_mult:g}ATR DC={self.dc_fast}/{self.dc_slow} "
+                f"crisis_cap={self.crisis_cap:g}")
 
 
 def default_grid(fast: bool = False) -> List[StrategyParams]:
@@ -127,15 +145,17 @@ def default_grid(fast: bool = False) -> List[StrategyParams]:
         top_k = (1, 2)
         stops = (0.0, 3.0)
         crisis = (0.0, 0.5)
+        dc = ((20, 55), (10, 55))            # (fast, slow) Donchian pairs
     else:
-        mom = (63, 126, 189, 252)
-        sma = (100, 150, 200, 250)
+        mom = (63, 126, 252)
+        sma = (150, 200, 250)
         top_k = (1, 2)
         stops = (0.0, 3.0)
         crisis = (0.0, 0.5)
-    grid = [StrategyParams(mom_lookback=m, sma_window=s, top_k=k,
-                           stop_atr_mult=st, crisis_cap=c)
-            for m, s, k, st, c in itertools.product(mom, sma, top_k, stops, crisis)]
+        dc = ((20, 55), (10, 55), (20, 100), (0, 0))   # (0, 0) = Donchian layer off
+    grid = [StrategyParams(mom_lookback=m, sma_window=s, top_k=k, stop_atr_mult=st,
+                           crisis_cap=c, dc_fast=f, dc_slow=sl)
+            for m, s, k, st, c, (f, sl) in itertools.product(mom, sma, top_k, stops, crisis, dc)]
     return grid
 
 
@@ -362,6 +382,8 @@ class Indicators:
     cash_mom: Dict[int, np.ndarray]   # lookback -> (T,) cash total return over L days
     vol: Dict[int, np.ndarray]        # window -> (T x N) annualised realised vol
     atr: Dict[int, np.ndarray]        # window -> (T x N) Wilder ATR in price units
+    dc_high: Dict[int, np.ndarray]    # window -> (T x N) highest high of the PRIOR n days
+    dc_low: Dict[int, np.ndarray]     # window -> (T x N) lowest low of the PRIOR n days
 
 
 def build_indicators(u: Universe, grid: Iterable[StrategyParams]) -> Indicators:
@@ -389,7 +411,13 @@ def build_indicators(u: Universe, grid: Iterable[StrategyParams]) -> Indicators:
     tr = tr[u.tickers]
     atr = {w: tr.ewm(alpha=1.0 / w, adjust=False, min_periods=w).mean().to_numpy()
            for w in {p.atr_window for p in grid}}
-    return Indicators(sma=sma, mom=mom, cash_mom=cash_mom, vol=vol, atr=atr)
+    # Donchian channels over the PRIOR n days (shift(1) excludes today's bar, so a
+    # close below dc_low is a genuine breakdown of the previous n-day range).
+    dc_windows = {n for p in grid for n in (p.dc_fast, p.dc_slow) if n > 0}
+    dc_high = {n: high.rolling(n).max().shift(1).to_numpy() for n in dc_windows}
+    dc_low = {n: low.rolling(n).min().shift(1).to_numpy() for n in dc_windows}
+    return Indicators(sma=sma, mom=mom, cash_mom=cash_mom, vol=vol, atr=atr,
+                      dc_high=dc_high, dc_low=dc_low)
 
 
 def rebalance_mask(dates: pd.DatetimeIndex, freq: str = "W") -> np.ndarray:
@@ -418,11 +446,40 @@ class EngineResult:
     gross: pd.Series            # gross risk exposure
     turnover: float             # total one-way turnover (sum |dw|)
     n_rebalances: int
-    n_stops: int
+    n_stops: int                # ATR trailing-stop exits
+    n_dc_exits: int             # fast Donchian channel exits
+    n_derisk: int               # intra-week regime de-risking events
 
 
-def _target_weights(t: int, p: StrategyParams, u: Universe, ind: Indicators) -> np.ndarray:
-    """Dual momentum + trend filter + vol sizing + regime cash buffer, using data <= t."""
+def _regime_cap(t: int, p: StrategyParams, u: Universe, ind: Indicators) -> float:
+    """Gross risk cap implied by the SPY regime at close t (SMA + momentum + Donchian).
+
+    Returns 1.0 during warm-up so the cap never forces trades before signals exist.
+    """
+    i = u.spy_idx
+    c = u.close[t, i]
+    sma_v = ind.sma[p.sma_window][t, i]
+    excess = ind.mom[p.mom_lookback][t, i] - ind.cash_mom[p.mom_lookback][t]
+    if not (np.isfinite(sma_v) and np.isfinite(excess)):
+        return 1.0
+    below_fast = p.dc_fast > 0 and c < ind.dc_low[p.dc_fast][t, i]      # NaN -> False
+    below_slow = p.dc_slow > 0 and c < ind.dc_low[p.dc_slow][t, i]
+    bull_sma = c > sma_v
+    if below_slow or (not bull_sma and excess <= 0):
+        return p.crisis_cap
+    if below_fast or not bull_sma:
+        return p.bear_cap
+    return 1.0
+
+
+def _target_weights(t: int, p: StrategyParams, u: Universe, ind: Indicators,
+                    current: Optional[np.ndarray] = None) -> np.ndarray:
+    """Dual momentum + trend filter + breakout confirmation + vol sizing + regime cap, data <= t.
+
+    `current` (weights held at close t) enables rank hysteresis: an eligible held name is
+    retained while it ranks within top_k + rank_buffer, so the book does not churn when two
+    assets swap places at the margin.  New entries fill only the remaining slots.
+    """
     n = len(u.tickers)
     mom_t = ind.mom[p.mom_lookback][t]
     cm = ind.cash_mom[p.mom_lookback][t]
@@ -433,20 +490,32 @@ def _target_weights(t: int, p: StrategyParams, u: Universe, ind: Indicators) -> 
             and np.isfinite(vol_t).all() and np.isfinite(cm)):
         return np.zeros(n)                       # warm-up: stay in cash
     excess = mom_t - cm                           # absolute momentum vs cash
-    # --- market regime (SPY) -> gross cap -------------------------------------
-    if c[u.spy_idx] > sma_t[u.spy_idx]:
-        cap = 1.0
-    elif excess[u.spy_idx] > 0:
-        cap = p.bear_cap
-    else:
-        cap = p.crisis_cap
+    cap = _regime_cap(t, p, u, ind)
     # --- eligibility and relative ranking -------------------------------------
-    eligible = (excess > 0) & (c > sma_t)
+    # Turtle logic: the breakout confirmation gates NEW entries only; a held name is
+    # kept until it fails momentum, the SMA, the fast channel, or its rank buffer.
+    hold_ok = (excess > 0) & (c > sma_t)
+    if p.dc_fast > 0:                             # fresh breakdown -> neither hold nor enter
+        hold_ok &= ~(c < ind.dc_low[p.dc_fast][t])
+    enter_ok = hold_ok.copy()
+    if p.dc_slow > 0:                             # entry needs close near the slow-channel high
+        tol = p.breakout_atr_tol * ind.atr[p.atr_window][t]
+        enter_ok &= c >= ind.dc_high[p.dc_slow][t] - tol      # NaN -> False (warm-up)
     w = np.zeros(n)
-    if cap <= 0 or not eligible.any():
+    if cap <= 0 or not hold_ok.any():
         return w
     order = np.argsort(-excess, kind="stable")
-    chosen = [i for i in order if eligible[i]][:p.top_k]
+    rank = np.empty(n, dtype=int)
+    rank[order] = np.arange(n)
+    chosen: List[int] = []
+    if current is not None:
+        chosen = [i for i in order if current[i] > 0 and hold_ok[i]
+                  and rank[i] < p.top_k + p.rank_buffer][:p.top_k]
+    for i in order:
+        if len(chosen) >= p.top_k:
+            break
+        if enter_ok[i] and i not in chosen:
+            chosen.append(i)
     for i in chosen:                              # inverse-vol sizing to target
         w[i] = min(p.max_weight, p.vol_target / (p.top_k * max(vol_t[i], 1e-4)))
     g = w.sum()
@@ -464,7 +533,9 @@ def run_engine(u: Universe, ind: Indicators, p: StrategyParams, start: int, end:
       2. execute the target decided at t-1 (cost = turnover * cost_bps)
       3. update trailing peaks
       4. if t is a decision day, compute a new target for execution at t+1
-      5. check ATR stops on positions held at close t -> exit at close t+1
+      5. DAILY: if the SPY regime cap (SMA / momentum / Donchian) is below current gross
+         exposure, scale the book down to the cap at close t+1 (never scale up intra-week)
+      6. DAILY: ATR trailing stop or fast-Donchian breakdown on a held name -> exit at t+1
     """
     n = len(u.tickers)
     atr = ind.atr[p.atr_window]
@@ -476,8 +547,9 @@ def run_engine(u: Universe, ind: Indicators, p: StrategyParams, start: int, end:
     port = np.zeros(T)
     gross = np.zeros(T)
     wts = np.zeros((T, n))
+    dc_low = ind.dc_low.get(p.dc_fast) if p.dc_fast > 0 else None
     turnover = 0.0
-    n_rebal = n_stops = 0
+    n_rebal = n_stops = n_dc = n_derisk = 0
     for k, t in enumerate(range(start, end)):
         r = u.ret[t]
         rp = float(w @ r) + (1.0 - w.sum()) * u.cash_ret[t]
@@ -499,26 +571,40 @@ def run_engine(u: Universe, ind: Indicators, p: StrategyParams, start: int, end:
         gross[k] = w.sum()
         wts[k] = w
         if decision_days[t]:
-            target = _target_weights(t, p, u, ind)
+            target = _target_weights(t, p, u, ind, current=w)
             if p.rebalance_band > 0:          # no-trade band on names already held and still wanted
                 keep = held & (target > 0) & (np.abs(target - w) <= p.rebalance_band)
                 target[keep] = w[keep]
             pending = target
             n_rebal += 1
-        if p.stop_atr_mult > 0 and held.any():
-            a = atr[t]
-            trig = held & np.isfinite(a) & (u.close[t] < peak - p.stop_atr_mult * a)
+        else:
+            # Daily regime check: cut gross exposure to the cap as soon as SPY breaks down.
+            book = w if pending is None else pending
+            g = book.sum()
+            if g > 0:
+                cap = _regime_cap(t, p, u, ind)
+                if (cap <= 0 and g > 0) or g > cap + p.rebalance_band:
+                    pending = book * (cap / g) if cap > 0 else np.zeros(n)
+                    n_derisk += 1
+        if held.any():
+            trig = np.zeros(n, dtype=bool)
+            if p.stop_atr_mult > 0:
+                a = atr[t]
+                st = held & np.isfinite(a) & (u.close[t] < peak - p.stop_atr_mult * a)
+                n_stops += int(st.sum())
+                trig |= st
+            if dc_low is not None:
+                dc = held & (u.close[t] < dc_low[t])          # NaN -> False
+                n_dc += int((dc & ~trig).sum())
+                trig |= dc
             if trig.any():
-                if pending is None:
-                    pending = w.copy()
-                pending = pending.copy()
+                pending = (w.copy() if pending is None else pending.copy())
                 pending[trig] = 0.0
-                n_stops += int(trig.sum())
     idx = u.dates[start:end]
     return EngineResult(returns=pd.Series(port, index=idx, name="satellite"),
                         weights=pd.DataFrame(wts, index=idx, columns=u.tickers),
                         gross=pd.Series(gross, index=idx), turnover=turnover,
-                        n_rebalances=n_rebal, n_stops=n_stops)
+                        n_rebalances=n_rebal, n_stops=n_stops, n_dc_exits=n_dc, n_derisk=n_derisk)
 
 
 # ----------------------------------------------------------------------------
@@ -716,15 +802,17 @@ def grid_search(u: Universe, ind: Indicators, grid: Sequence[StrategyParams], st
         rows.append({**asdict(p), "objective": fast_objective(r, rf, objective),
                      "sharpe": fast_sharpe(r, rf), "cagr": eq[-1] ** (TRADING_DAYS / len(r)) - 1,
                      "max_drawdown": mdd, "turnover_py": res.turnover / (len(r) / TRADING_DAYS),
-                     "n_stops": res.n_stops, "avg_gross": float(res.gross.mean())})
+                     "n_stops": res.n_stops, "n_dc_exits": res.n_dc_exits, "n_derisk": res.n_derisk,
+                     "avg_gross": float(res.gross.mean())})
         if (i + 1) % 25 == 0 or i + 1 == len(grid):
             LOG.info("  grid %3d/%d  (%.0fs)", i + 1, len(grid), time.time() - t0)
     tab = pd.DataFrame(rows)
     # --- neighbourhood smoothing ------------------------------------------------
     moms = sorted(tab["mom_lookback"].unique())
     smas = sorted(tab["sma_window"].unique())
-    other = [c for c in ("top_k", "stop_atr_mult", "crisis_cap", "vol_target", "bear_cap",
-                         "max_weight", "rebalance_band", "vol_window", "atr_window") if c in tab.columns]
+    other = [c for c in ("top_k", "stop_atr_mult", "dc_fast", "dc_slow", "breakout_atr_tol", "crisis_cap",
+                         "vol_target", "bear_cap", "max_weight", "rebalance_band", "rank_buffer", "vol_window",
+                         "atr_window") if c in tab.columns]
     key = tab.set_index(["mom_lookback", "sma_window"] + other)["objective"].to_dict()
     smoothed = []
     for _, row in tab.iterrows():
@@ -876,6 +964,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--vol-target", type=float, default=0.10)
     ap.add_argument("--bear-cap", type=float, default=0.75)
     ap.add_argument("--rebalance-band", type=float, default=0.05, help="no-trade band on held names (weight units)")
+    ap.add_argument("--max-weight", type=float, default=1.0, help="per-asset weight cap (e.g. 0.6 to avoid full concentration with K=1)")
+    ap.add_argument("--breakout-atr-tol", type=float, default=1.0,
+                    help="entry allowed if close >= slow Donchian high - tol*ATR (0 = exact breakout)")
     ap.add_argument("--objective", default="sharpe", choices=["sharpe", "sortino", "calmar"])
     ap.add_argument("--train-frac", type=float, default=0.70)
     ap.add_argument("--satellite-weight", type=float, default=0.30, help="satellite share in the core+satellite blend")
@@ -920,12 +1011,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # ---------------- STAGE B ----------------
     banner("STAGE B  SYSTEMATIC INDICATOR GENERATION")
     grid = default_grid(fast=args.fast)
-    grid = [replace(p, vol_target=args.vol_target, bear_cap=args.bear_cap, rebalance_band=args.rebalance_band)
-            for p in grid]
+    grid = [replace(p, vol_target=args.vol_target, bear_cap=args.bear_cap, rebalance_band=args.rebalance_band,
+                    breakout_atr_tol=args.breakout_atr_tol, max_weight=args.max_weight) for p in grid]
     ind = build_indicators(u, grid)
     decision_days = rebalance_mask(u.dates, args.rebalance)
     print(f"Indicators: SMA windows {sorted(ind.sma)} | momentum lookbacks {sorted(ind.mom)} | "
-          f"vol window {sorted(ind.vol)} | ATR window {sorted(ind.atr)}")
+          f"vol window {sorted(ind.vol)} | ATR window {sorted(ind.atr)} | Donchian windows {sorted(ind.dc_low)}")
     print(f"Decisions : {int(decision_days.sum())} decision days at frequency '{args.rebalance}', "
           f"executed next close, cost {args.cost_bps:g} bps one-way")
     print(f"Grid      : {len(grid)} parameter sets, objective = {args.objective}")
@@ -941,8 +1032,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Test (OOS): {oos_start.date()} -> {u.dates[-1].date()}")
     print(f"Selected  : {best.label()}  (vol_target={best.vol_target:g}, bear_cap={best.bear_cap:g})")
     print("\nTop 10 parameter sets on TRAIN (ranked by neighbourhood-smoothed objective):")
-    show_cols = ["mom_lookback", "sma_window", "top_k", "stop_atr_mult", "crisis_cap", "objective",
-                 "smoothed_objective", "sharpe", "cagr", "max_drawdown", "turnover_py", "n_stops", "avg_gross"]
+    show_cols = ["mom_lookback", "sma_window", "top_k", "stop_atr_mult", "dc_fast", "dc_slow", "crisis_cap",
+                 "objective", "smoothed_objective", "sharpe", "cagr", "max_drawdown", "turnover_py",
+                 "n_stops", "n_dc_exits", "n_derisk", "avg_gross"]
     print(gs.table[show_cols].head(10).to_string(index=False, float_format=lambda v: f"{v:,.3f}"))
     q = gs.table["sharpe"].quantile([0.1, 0.25, 0.5, 0.75, 0.9])
     print("\nParameter-surface diagnostics (TRAIN Sharpe across the whole grid):")
@@ -963,11 +1055,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sat_oos = test_res.returns.rename("Satellite (OOS)")
     oos = slice(oos_start, None)
     blend_w = args.satellite_weight
+    ablation = None
+    if best.dc_fast > 0 or best.dc_slow > 0:      # same parameters, Donchian layer switched off
+        ablation = run_engine(u, ind, replace(best, dc_fast=0, dc_slow=0), split, len(u.dates),
+                              decision_days, args.cost_bps).returns.rename("no Donchian")
     series_oos = {
         "SPY buy & hold": spy.loc[oos],
         "60/40 SPY/TLT (monthly)": rebalanced_mix(risk_rets.loc[oos, ["SPY", "TLT"]], [0.6, 0.4]).rename("60/40")
         if "TLT" in u.tickers else None,
         "Satellite (OOS)": sat_oos,
+        "Satellite OOS, Donchian OFF (ablation)": ablation,
         f"Core {1 - blend_w:.0%} SPY + {blend_w:.0%} Satellite (monthly)":
             rebalanced_mix(pd.concat([spy.loc[oos], sat_oos], axis=1), [1 - blend_w, blend_w]),
     }
@@ -977,9 +1074,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
            f"(parameters frozen from TRAIN; never touched OOS data)")
     tab_oos = performance_table(series_oos, rf, "SPY buy & hold")
     print(format_table(tab_oos))
-    print(f"\nSatellite OOS activity: {test_res.n_rebalances} decision days, {test_res.n_stops} stop-outs, "
+    print(f"\nSatellite OOS activity: {test_res.n_rebalances} decision days, {test_res.n_stops} ATR stop-outs, "
+          f"{test_res.n_dc_exits} Donchian exits, {test_res.n_derisk} intra-week de-risking events, "
           f"annualised one-way turnover {test_res.turnover / (len(sat_oos) / TRADING_DAYS):.2f}x, "
           f"avg gross risk {test_res.gross.mean():.0%}, time fully in cash {(test_res.gross <= 1e-9).mean():.0%}")
+    if ablation is not None:
+        print("The ablation row re-runs the SAME selected parameters with dc_fast = dc_slow = 0, isolating the\n"
+              "effect of the multi-timeframe breakout layer on drawdown depth and recovery time.")
     print("Sharpe/Sortino are computed on returns in EXCESS of the cash proxy; recovery_days = trading days from\n"
           "the max-drawdown trough to the next equity high ('not yet' if still under water).")
     tab_oos.to_csv(out_dir / "summary_oos.csv")
@@ -1017,7 +1118,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                   args.wfo_train_years, args.wfo_test_years)
         folds: pd.DataFrame = wf["folds"]
         fold_cols = ["fold", "test_start", "test_end", "mom_lookback", "sma_window", "top_k", "stop_atr_mult",
-                     "crisis_cap", "is_objective", "oos_sharpe", "oos_return", "bench_oos_return"]
+                     "dc_fast", "dc_slow", "crisis_cap", "is_objective", "oos_sharpe", "oos_return", "bench_oos_return"]
         print(folds[fold_cols].to_string(index=False, float_format=lambda v: f"{v:,.3f}"))
         wfo_ret: pd.Series = wf["oos_returns"].rename("Satellite (WFO stitched)")
         series_wfo = {"SPY buy & hold": spy.reindex(wfo_ret.index), "Satellite (WFO stitched)": wfo_ret,
@@ -1026,7 +1127,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"\nStitched OOS period {wfo_ret.index[0].date()} -> {wfo_ret.index[-1].date()} "
               f"({len(folds)} folds, parameters re-fitted every {args.wfo_test_years:g} years)")
         print(format_table(performance_table(series_wfo, rf, "SPY buy & hold")))
-        stability = folds[["mom_lookback", "sma_window", "top_k", "stop_atr_mult", "crisis_cap"]].nunique()
+        stability = folds[["mom_lookback", "sma_window", "top_k", "stop_atr_mult", "dc_fast", "dc_slow",
+                           "crisis_cap"]].nunique()
         print("\nParameter stability across folds (distinct values chosen): " + ", ".join(f"{k}={v}" for k, v in stability.items()))
         folds.to_csv(out_dir / "wfo_folds.csv", index=False)
         pd.DataFrame({k: (1 + v).cumprod() for k, v in series_wfo.items()}).to_csv(out_dir / "wfo_equity_curves.csv")
